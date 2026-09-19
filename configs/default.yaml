@@ -1,0 +1,97 @@
+gate:
+  downscale: 0.5
+  min_energy: 2.0
+  min_blob_area: 40
+  roi_pad: 16
+  morph_kernel: 3
+  diff_history: 0.85
+
+detector:
+  weights: auto
+  imgsz: 640
+  conf: 0.25
+  iou: 0.45
+  backend: auto
+  on_crops: false
+  device: auto
+  world_classes:
+    - person
+    - car
+    - truck
+    - bus
+    - motorcycle
+    - bicycle
+    - tank
+    - armored vehicle
+    - drone
+    - uav
+    - helicopter
+    - airplane
+    - boat
+
+runtime:
+  providers:
+    - CUDAExecutionProvider
+    - CPUExecutionProvider
+
+rf:
+  n_range: 128
+  n_doppler: 64
+  cs_lambda: 0.02
+  cs_iters: 40
+  cs_sample_frac: 0.35
+  gauss_sigmas:
+    - 1.0
+    - 2.0
+    - 4.0
+  clutter_rank: 3
+  tda_eps: 3.0
+  energy_gate: 2.5
+
+hdc:
+  dim: 10000
+  seed: 7
+  gallery: data/gallery
+  min_cosine: 0.12
+
+ekf:
+  dt: 0.033
+  process_var: 25.0
+  meas_var: 4.0
+  radar_var: 16.0
+  max_age: 15
+  min_hits: 2
+  iou_weight: 0.55
+  mahalanobis_gate: 9.21
+
+tracker:
+  backend: midus
+  high_thresh: 0.5
+  low_thresh: 0.1
+
+duty:
+  enabled: true
+  detect_every: 5
+  refresh_age: 8
+  tiny_area_frac: 0.035
+  tile_min: 320
+  tile_pad: 24
+  cover_iou: 0.25
+  hdc_if_conf_below: 1.0
+  publish_min_hits: 2
+  publish_max_coast: 12
+  require_hdc: false
+  min_hdc_score: 0.12
+
+radar:
+  mode: synthetic
+  n_targets: 2
+  snr_db: 12.0
+  clutter_power: 8.0
+
+viz:
+  rd_inset: true
+  show_gate: true
+
+log:
+  jsonl: runs/tracks.jsonl

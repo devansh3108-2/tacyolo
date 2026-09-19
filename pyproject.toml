@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tacyolo"
+version = "0.1.0"
+description = "YOLO-style gated detection, synthetic RF fusion, HDC matching, and EKF tracking."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "pyyaml>=6.0",
+    "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+yolo = [
+    "ultralytics>=8.3",
+    "onnxruntime>=1.17",
+    "huggingface_hub>=0.24",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+tacyolo = "tacyolo.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tacyolo*"]
+
+[tool.setuptools.package-data]
+tacyolo = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

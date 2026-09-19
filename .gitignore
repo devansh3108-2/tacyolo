@@ -1,0 +1,43 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+.env.*
+.pytest_cache/
+.mypy_cache/
+.cursor/
+
+# local train/runtime artifacts (too large for git)
+runs/
+datasets/
+weights/
+data/tactical/images/
+data/tactical/labels/
+data/tactical/*.cache
+data/tactical/stages.json
+data/tactical/bot_queue.json
+
+# model binaries and video dumps
+*.pt
+*.onnx
+*.engine
+*.mp4
+!examples/**
+
+*.b64
+
+# secrets
+kaggle.json
+.kaggle/
+credentials.json
+
+# third-party papers sitting in the workspace
+A Hybrid Sub-Nyquist*.pdf
+
+.DS_Store
+Thumbs.db

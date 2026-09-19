@@ -1,0 +1,69 @@
+TACYOLO Test Kit
+================
+Software-defined detect + track. Not a weapons or fire-control system.
+
+What this is
+------------
+Gated YOLO (skip idle frames) + hyperdimensional gallery match + MIDUS tracker
+(ByteTrack-style two-stage IDs on an EKF; --tracker ekf for single-stage)
++ a synthetic radar path (compressed sensing, clutter, peak extract).
+Windows desktop prototype. GPU optional.
+
+Requirements
+------------
+- Windows or Linux
+- Python 3.10 or newer
+- NVIDIA GPU optional (CPU works; slower)
+
+Install (from this folder)
+--------------------------
+    python -m pip install -U pip
+    python -m pip install -e ".[yolo,dev]"
+
+Run the tests
+-------------
+    python -m pytest
+
+Synthetic demo (no camera, no internet)
+---------------------------------------
+    python examples/demo_track.py
+
+Writes:
+    runs/demo.mp4
+    runs/tracks.jsonl
+
+Detect on the sample image (uses bundled YOLO weights)
+-------------------------------------------------------
+    python -m tacyolo predict --source bus.jpg --save runs/bus_out.mp4 --max-frames 1 --weights auto
+
+Live webcam
+-----------
+    python examples/run_camera.py
+
+CLI
+---
+    python -m tacyolo predict --source path/to/video.mp4 --save runs/out.mp4
+    python -m tacyolo track   --source path/to/video.mp4 --radar synthetic --save runs/out.mp4
+    python -m tacyolo track   --source path/to/video.mp4 --tracker ekf
+    python -m tacyolo fetch
+
+Bundled weights (folder weights/)
+---------------------------------
+    yolo11n.pt              COCO nano
+    yolo11s.pt              COCO small (better accuracy)
+    military_yolov8s.pt     aerial/ground military classes
+    yolov8s-worldv2.pt      open-vocab (drone, tank, helicopter prompts)
+
+Layout
+------
+    tacyolo/     algorithm (gate, YOLO, HDC, EKF, MIDUS, RF)
+    examples/    demo + webcam
+    tests/       unit + integration tests
+    configs/     default.yaml
+    weights/     detectors
+    bus.jpg      sample image
+
+Do not include
+--------------
+Training datasets and overnight run folders were left out so this zip stays sendable.
+Those live only on the training machine.
