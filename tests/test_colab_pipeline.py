@@ -37,8 +37,14 @@ def _tiny_jpeg(path: Path) -> None:
 
 def test_load_and_save_state_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
-    assert load_state(path) == {"done": [], "failed": [], "current": None, "history": []}
-    st = {"done": ["a/b"], "failed": [], "current": None, "history": []}
+    assert load_state(path) == {
+        "done": [],
+        "failed": [],
+        "current": None,
+        "history": [],
+        "replenished": [],
+    }
+    st = {"done": ["a/b"], "failed": [], "current": None, "history": [], "replenished": []}
     save_state(path, st)
     assert load_state(path)["done"] == ["a/b"]
 
@@ -54,6 +60,15 @@ def test_repo_queue_has_150_unique_refs() -> None:
     assert len(refs) == 150
     assert len(set(refs)) == 150
     assert all("/" in r and not r.startswith("#") for r in refs)
+
+
+def test_replenish_pool_is_disjoint_alternate_slugs() -> None:
+    queue = set(load_queue(ROOT / "colab_pipeline" / "download_queue.txt"))
+    pool = load_queue(ROOT / "colab_pipeline" / "replenish_pool.txt")
+    assert 50 <= len(pool) <= 100
+    assert len(set(pool)) == len(pool)
+    assert queue.isdisjoint(pool)
+    assert all("/" in r for r in pool)
 
 
 def test_find_pairs_images_and_labels_dirs(tmp_path: Path) -> None:
@@ -151,3 +166,61 @@ def test_run_cycle_skips_done_failed_and_pushes(tmp_path: Path, monkeypatch: pyt
     assert (repo / "weights" / "DET-YOLO.pt").read_bytes() == b"best-weights"
     assert not (work / "current_yolo").exists()
     assert json.loads((repo / "state.json").read_text(encoding="utf-8"))["done"][-1] == "owner/next-ds"
+
+
+def _install_cycle_fakes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, download):
+    work = tmp_path / "work"
+    monkeypatch.setenv("DET_YOLO_WORK", str(work))
+    monkeypatch.setitem(sys.modules, "kagglehub", type("K", (), {"dataset_download": staticmethod(download)})())
+    monkeypatch.setitem(sys.modules, "ultralytics", type("U", (), {"YOLO": _DummyYOLO})())
+    import pipeline_loop as pl
+
+    monkeypatch.setattr(pl, "_seed_base_weights", lambda weights: Path(weights).write_bytes(b"seed-weights"))
+    pushes: list[str] = []
+    monkeypatch.setattr(pl, "git_push", lambda *a, **k: pushes.append(a[1] if len(a) > 1 else k.get("message", "")))
+    return work, pushes
+
+
+def test_fail_replenishes_until_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "colab_pipeline"
+    repo.mkdir()
+    (repo / "download_queue.txt").write_text("owner/bad-a\nowner/later-ok\n", encoding="utf-8")
+    (repo / "replenish_pool.txt").write_text("owner/bad-b\nowner/good-repl\n", encoding="utf-8")
+    save_state(repo / "state.json", {"done": [], "failed": [], "current": None, "history": [], "replenished": []})
+    (repo / "weights").mkdir()
+
+    raw_ok = tmp_path / "kaggle" / "good" / "versions" / "1"
+    (raw_ok / "images").mkdir(parents=True)
+    _tiny_jpeg(raw_ok / "images" / "x.jpg")
+    (raw_ok / "images" / "x.txt").write_text("0 0.5 0.5 0.1 0.1\n", encoding="utf-8")
+
+    def download(ref: str) -> str:
+        if "bad" in ref:
+            raise RuntimeError("download failed")
+        return str(raw_ok)
+
+    _install_cycle_fakes(tmp_path, monkeypatch, download)
+    st = run_cycle(repo, epochs=1, max_datasets=1, delete_after=True)
+    assert "owner/bad-a" in st["failed"]
+    assert "owner/bad-b" in st["failed"]
+    assert "owner/good-repl" in st["done"]
+    assert "owner/later-ok" not in st["done"]  # stopped after 1 success
+    assert st["replenished"] == [{"from": "owner/good-repl", "for": "owner/bad-a"}]
+    assert any(h.get("replenish_for") == "owner/bad-a" and h.get("ok") for h in st["history"])
+
+
+def test_replenish_stops_when_pool_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "colab_pipeline"
+    repo.mkdir()
+    (repo / "download_queue.txt").write_text("owner/only-bad\n", encoding="utf-8")
+    (repo / "replenish_pool.txt").write_text("owner/also-bad\n", encoding="utf-8")
+    save_state(repo / "state.json", {"done": [], "failed": [], "current": None, "history": [], "replenished": []})
+    (repo / "weights").mkdir()
+
+    def download(ref: str) -> str:
+        raise RuntimeError("download failed")
+
+    _install_cycle_fakes(tmp_path, monkeypatch, download)
+    st = run_cycle(repo, epochs=1, max_datasets=1, delete_after=True)
+    assert st["done"] == []
+    assert st["failed"] == ["owner/only-bad", "owner/also-bad"]

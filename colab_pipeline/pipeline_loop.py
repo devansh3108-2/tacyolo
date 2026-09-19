@@ -17,7 +17,7 @@ IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 def load_state(path: Path) -> dict:
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
-    return {"done": [], "failed": [], "current": None, "history": []}
+    return {"done": [], "failed": [], "current": None, "history": [], "replenished": []}
 
 
 def save_state(path: Path, st: dict) -> None:
@@ -26,6 +26,8 @@ def save_state(path: Path, st: dict) -> None:
 
 
 def load_queue(path: Path) -> list[str]:
+    if not path.exists():
+        return []
     return [
         ln.strip()
         for ln in path.read_text(encoding="utf-8").splitlines()
@@ -170,6 +172,14 @@ def git_push(repo: Path, message: str, force_add: list[Path] | None = None) -> N
     run(["git", "push", "origin", "HEAD"])
 
 
+def _pop_unused(refs: list[str], used: set[str]) -> str | None:
+    while refs:
+        ref = refs.pop(0)
+        if ref not in used:
+            return ref
+    return None
+
+
 def run_cycle(
     repo: Path,
     *,
@@ -180,12 +190,14 @@ def run_cycle(
     skip_if_no_labels: bool = False,
     delete_after: bool = True,
     max_datasets: int | None = None,
+    replenish: bool = True,
 ):
     import kagglehub
     from ultralytics import YOLO
 
     repo = Path(repo)
     queue_path = repo / "download_queue.txt"
+    pool_path = repo / "replenish_pool.txt"
     state_path = repo / "state.json"
     weights = repo / "weights" / "DET-YOLO.pt"
     work = Path(os.environ.get("DET_YOLO_WORK", "/content/det_yolo_work"))
@@ -196,16 +208,44 @@ def run_cycle(
     _seed_base_weights(weights)
 
     st = load_state(state_path)
+    st.setdefault("replenished", [])
     done = set(st.get("done") or [])
     failed = set(st.get("failed") or [])
-    pending = [r for r in load_queue(queue_path) if r not in done and r not in failed]
-    if max_datasets is not None:
-        pending = pending[:max_datasets]
-    print(f"pending={len(pending)} done={len(done)} failed={len(failed)}")
+    used = set(done) | set(failed)
 
-    for idx, ref in enumerate(pending, 1):
+    main_queue = load_queue(queue_path)
+    main_set = set(main_queue)
+    pending = [r for r in main_queue if r not in used]
+    pool = [r for r in load_queue(pool_path) if r not in used and r not in main_set]
+
+    # Aim for successful trains (queue length, typically 150), not attempts.
+    success_goal = len(main_queue) if main_queue else 0
+    if max_datasets is not None:
+        success_goal = min(success_goal, len(done) + max_datasets)
+
+    print(
+        f"pending_queue={len(pending)} pool={len(pool)} "
+        f"done={len(done)} failed={len(failed)} success_goal={success_goal}"
+    )
+
+    def cleanup(raw: Path | None) -> None:
+        if not delete_after:
+            return
+        if raw is not None:
+            delete_path(raw)
+            try:
+                if raw.parent.name.startswith("versions"):
+                    delete_path(raw.parent.parent)
+            except Exception:
+                pass
+        delete_path(yolo_dir)
+        delete_path(runs_dir)
+        print("deleted local dataset")
+
+    def attempt(ref: str, *, replenish_for: str | None = None) -> bool:
         print("\n" + "=" * 60)
-        print(f"[{idx}/{len(pending)}] {ref}")
+        tag = f"replenish for {replenish_for}" if replenish_for else "queue"
+        print(f"{ref}  [{tag}]  done={len(done)}/{success_goal}")
         st["current"] = ref
         save_state(state_path, st)
         raw = None
@@ -240,53 +280,76 @@ def run_cycle(
                 raise RuntimeError("no weights after train")
             shutil.copy2(src, weights)
             st.setdefault("done", []).append(ref)
-            st.setdefault("history", []).append(
-                {
-                    "ref": ref,
-                    "ok": True,
-                    "images": n_img,
-                    "labeled": n_lab,
-                    "sec": round(time.time() - t0),
-                    "at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+            rec = {
+                "ref": ref,
+                "ok": True,
+                "images": n_img,
+                "labeled": n_lab,
+                "sec": round(time.time() - t0),
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+            if replenish_for:
+                rec["replenish_for"] = replenish_for
+                st.setdefault("replenished", []).append({"from": ref, "for": replenish_for})
+            st.setdefault("history", []).append(rec)
             done.add(ref)
+            used.add(ref)
             st["current"] = None
             save_state(state_path, st)
-            git_push(repo, f"train: {ref} (+{n_img} imgs, {epochs} ep)", force_add=[weights])
+            msg = f"train: {ref} (+{n_img} imgs, {epochs} ep)"
+            if replenish_for:
+                msg = f"train: {ref} (replenish for {replenish_for}, +{n_img} imgs, {epochs} ep)"
+            git_push(repo, msg, force_add=[weights])
+            return True
         except Exception as e:
             print("FAIL", ref, e)
             st.setdefault("failed", []).append(ref)
-            st.setdefault("history", []).append(
-                {
-                    "ref": ref,
-                    "ok": False,
-                    "error": str(e)[:400],
-                    "at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+            rec = {
+                "ref": ref,
+                "ok": False,
+                "error": str(e)[:400],
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+            if replenish_for:
+                rec["replenish_for"] = replenish_for
+            st.setdefault("history", []).append(rec)
             failed.add(ref)
+            used.add(ref)
             st["current"] = None
             save_state(state_path, st)
             try:
                 git_push(repo, f"fail: {ref}")
             except Exception as pe:
                 print("push after fail skipped:", pe)
+            return False
         finally:
-            if delete_after:
-                if raw is not None:
-                    delete_path(raw)
-                    # kagglehub often nests the extract under versions/N — drop the slug cache too
-                    try:
-                        if raw.parent.name.startswith("versions"):
-                            delete_path(raw.parent.parent)
-                    except Exception:
-                        pass
-                delete_path(yolo_dir)
-                delete_path(runs_dir)
-                print("deleted local dataset")
+            cleanup(raw)
             st["current"] = None
             save_state(state_path, st)
 
-    print("PIPELINE PASS COMPLETE")
+    while len(done) < success_goal:
+        ref = _pop_unused(pending, used)
+        source = "queue"
+        replenish_for = None
+        if ref is None and replenish:
+            # Backfill remaining success deficit from the pool (old fails / exhausted queue).
+            ref = _pop_unused(pool, used)
+            source = "replenish"
+            replenish_for = None
+        if ref is None:
+            print("no more slugs (queue + replenish pool empty)")
+            break
+
+        ok = attempt(ref, replenish_for=replenish_for)
+        # FAIL → immediately pull replacements until a train succeeds or the pool is empty.
+        failed_orig = ref
+        while (not ok) and replenish:
+            repl = _pop_unused(pool, used)
+            if repl is None:
+                print(f"replenish pool empty after FAIL {failed_orig}")
+                break
+            print(f"REPLENISH after FAIL {failed_orig} → {repl}")
+            ok = attempt(repl, replenish_for=failed_orig)
+
+    print("PIPELINE PASS COMPLETE", f"done={len(done)} failed={len(failed)}")
     return st
