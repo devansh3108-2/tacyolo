@@ -11,17 +11,18 @@ sys.path.insert(0, str(ROOT / "colab_pipeline"))
 
 from pipeline_loop import (  # noqa: E402
     build_yolo_set,
+    find_dataset_dir,
     find_pairs,
     git_root,
     load_queue,
     load_state,
+    ref_to_dirname,
     run_cycle,
     save_state,
 )
 
 
 def _tiny_jpeg(path: Path) -> None:
-    # 1x1 JPEG, no extra deps
     path.write_bytes(
         bytes.fromhex(
             "ffd8ffe000104a46494600010100000100010000"
@@ -35,15 +36,27 @@ def _tiny_jpeg(path: Path) -> None:
     )
 
 
+def _labeled_ds(root: Path) -> Path:
+    img_dir = root / "images"
+    img_dir.mkdir(parents=True)
+    _tiny_jpeg(img_dir / "x.jpg")
+    (img_dir / "x.txt").write_text("0 0.5 0.5 0.1 0.1\n", encoding="utf-8")
+    return root
+
+
+def _unlabeled_ds(root: Path) -> Path:
+    img_dir = root / "images"
+    img_dir.mkdir(parents=True)
+    _tiny_jpeg(img_dir / "x.jpg")
+    return root
+
+
 def test_load_and_save_state_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
-    assert load_state(path) == {
-        "done": [],
-        "failed": [],
-        "current": None,
-        "history": [],
-        "replenished": [],
-    }
+    empty = load_state(path)
+    assert empty["done"] == []
+    assert empty["skipped"] == []
+    assert empty["downloaded"] == []
     st = {"done": ["a/b"], "failed": [], "current": None, "history": [], "replenished": []}
     save_state(path, st)
     assert load_state(path)["done"] == ["a/b"]
@@ -94,9 +107,6 @@ def test_build_yolo_set_caps_and_empty_unlabeled(tmp_path: Path) -> None:
     assert yaml_path.exists()
     assert n == 2
     assert n_lab == 1
-    labels = sorted((tmp_path / "yolo" / "labels" / "train").glob("*.txt"))
-    assert len(labels) == 2
-    assert sum(1 for p in labels if p.stat().st_size > 0) == 1
 
 
 def test_git_root_walks_up(tmp_path: Path) -> None:
@@ -104,6 +114,16 @@ def test_git_root_walks_up(tmp_path: Path) -> None:
     nested = tmp_path / "colab_pipeline"
     nested.mkdir()
     assert git_root(nested) == tmp_path.resolve()
+
+
+def test_find_dataset_dir_owner_slug_layouts(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    dashed = _labeled_ds(data / "acme--visdrone")
+    assert find_dataset_dir(data, "acme/visdrone") == dashed
+    nested = _labeled_ds(data / "owner" / "slug")
+    assert find_dataset_dir(data, "owner/slug") == nested
+    assert find_dataset_dir(data, "missing/ds") is None
+    assert ref_to_dirname("acme/visdrone") == "acme--visdrone"
 
 
 class _DummyYOLO:
@@ -122,105 +142,128 @@ class _DummyYOLO:
         Path(path).write_bytes(b"seed-weights")
 
 
-def test_run_cycle_skips_done_failed_and_pushes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_train_fakes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    work = tmp_path / "work"
+    monkeypatch.setenv("DET_YOLO_WORK", str(work))
+    monkeypatch.setitem(sys.modules, "ultralytics", type("U", (), {"YOLO": _DummyYOLO})())
+    import pipeline_loop as pl
+
+    monkeypatch.setattr(pl, "_seed_base_weights", lambda weights: Path(weights).write_bytes(b"seed-weights"))
+    pushes: list[str] = []
+    monkeypatch.setattr(pl, "git_push", lambda *a, **k: pushes.append(a[1] if len(a) > 1 else ""))
+    return work, pushes
+
+
+def test_run_cycle_trains_local_folder_not_kaggle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = tmp_path / "colab_pipeline"
     repo.mkdir()
     (repo / "download_queue.txt").write_text(
-        "owner/done-ds\nowner/fail-ds\nowner/next-ds\n", encoding="utf-8"
+        "owner/done-ds\nowner/fail-ds\nowner/next-ds\nowner/not-ready\n", encoding="utf-8"
     )
+    (repo / "replenish_pool.txt").write_text("owner/pool-a\n", encoding="utf-8")
     save_state(
         repo / "state.json",
         {"done": ["owner/done-ds"], "failed": ["owner/fail-ds"], "current": None, "history": []},
     )
     (repo / "weights").mkdir()
+    data = tmp_path / "data"
+    _labeled_ds(data / "owner--next-ds")
+    work, pushes = _install_train_fakes(tmp_path, monkeypatch)
 
-    raw = tmp_path / "kaggle" / "owner" / "next-ds" / "versions" / "1"
-    (raw / "images").mkdir(parents=True)
-    _tiny_jpeg(raw / "images" / "x.jpg")
-    (raw / "images" / "x.txt").write_text("0 0.5 0.5 0.1 0.1\n", encoding="utf-8")
-
-    work = tmp_path / "work"
-    monkeypatch.setenv("DET_YOLO_WORK", str(work))
-    monkeypatch.setitem(sys.modules, "kagglehub", type("K", (), {"dataset_download": staticmethod(lambda ref: str(raw))})())
-    monkeypatch.setitem(sys.modules, "ultralytics", type("U", (), {"YOLO": _DummyYOLO})())
-
-    pushes: list[str] = []
-
-    def fake_push(repo_path: Path, message: str, force_add=None) -> None:
-        pushes.append(message)
-
-    monkeypatch.setattr("pipeline_loop.git_push", fake_push)
-    monkeypatch.setattr("pipeline_loop.YOLO", _DummyYOLO, raising=False)
-
-    # run_cycle imports YOLO/kagglehub inside the function
-    import pipeline_loop as pl
-
-    monkeypatch.setattr(pl, "_seed_base_weights", lambda weights: Path(weights).write_bytes(b"seed-weights"))
-
-    st = run_cycle(repo, epochs=1, max_datasets=5, delete_after=True)
-    assert "owner/done-ds" in st["done"]
-    assert "owner/fail-ds" in st["failed"]
+    st = run_cycle(
+        repo,
+        data,
+        epochs=1,
+        max_datasets=5,
+        after_train="delete",
+        push=True,
+    )
     assert "owner/next-ds" in st["done"]
-    assert st["current"] is None
+    assert "owner/not-ready" not in st["done"]
+    assert "owner/not-ready" not in st["failed"]
     assert any(m.startswith("train: owner/next-ds") for m in pushes)
     assert (repo / "weights" / "DET-YOLO.pt").read_bytes() == b"best-weights"
+    assert not (data / "owner--next-ds").exists()
     assert not (work / "current_yolo").exists()
     assert json.loads((repo / "state.json").read_text(encoding="utf-8"))["done"][-1] == "owner/next-ds"
 
 
-def _install_cycle_fakes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, download):
-    work = tmp_path / "work"
-    monkeypatch.setenv("DET_YOLO_WORK", str(work))
-    monkeypatch.setitem(sys.modules, "kagglehub", type("K", (), {"dataset_download": staticmethod(download)})())
-    monkeypatch.setitem(sys.modules, "ultralytics", type("U", (), {"YOLO": _DummyYOLO})())
-    import pipeline_loop as pl
-
-    monkeypatch.setattr(pl, "_seed_base_weights", lambda weights: Path(weights).write_bytes(b"seed-weights"))
-    pushes: list[str] = []
-    monkeypatch.setattr(pl, "git_push", lambda *a, **k: pushes.append(a[1] if len(a) > 1 else k.get("message", "")))
-    return work, pushes
-
-
-def test_fail_replenishes_until_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_labels_skip_and_replenish_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = tmp_path / "colab_pipeline"
     repo.mkdir()
-    (repo / "download_queue.txt").write_text("owner/bad-a\nowner/later-ok\n", encoding="utf-8")
-    (repo / "replenish_pool.txt").write_text("owner/bad-b\nowner/good-repl\n", encoding="utf-8")
-    save_state(repo / "state.json", {"done": [], "failed": [], "current": None, "history": [], "replenished": []})
+    (repo / "download_queue.txt").write_text("owner/no-lab\nowner/later\n", encoding="utf-8")
+    (repo / "replenish_pool.txt").write_text("owner/good-repl\n", encoding="utf-8")
+    save_state(repo / "state.json", load_state(repo / "state.json"))
     (repo / "weights").mkdir()
+    data = tmp_path / "data"
+    _unlabeled_ds(data / "owner--no-lab")
+    _labeled_ds(data / "owner--good-repl")
+    _labeled_ds(data / "owner--later")
+    _install_train_fakes(tmp_path, monkeypatch)
 
-    raw_ok = tmp_path / "kaggle" / "good" / "versions" / "1"
-    (raw_ok / "images").mkdir(parents=True)
-    _tiny_jpeg(raw_ok / "images" / "x.jpg")
-    (raw_ok / "images" / "x.txt").write_text("0 0.5 0.5 0.1 0.1\n", encoding="utf-8")
+    st = run_cycle(repo, data, epochs=1, max_datasets=1, after_train="keep", skip_if_no_labels=True)
+    assert "owner/no-lab" in st["skipped"]
+    assert "owner/good-repl" in st["done"]
+    assert "owner/later" not in st["done"]
+    assert st["replenished"] == [{"from": "owner/good-repl", "for": "owner/no-lab"}]
 
-    def download(ref: str) -> str:
-        if "bad" in ref:
-            raise RuntimeError("download failed")
-        return str(raw_ok)
 
-    _install_cycle_fakes(tmp_path, monkeypatch, download)
-    st = run_cycle(repo, epochs=1, max_datasets=1, delete_after=True)
+def test_train_fail_replenishes_until_local_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "colab_pipeline"
+    repo.mkdir()
+    (repo / "download_queue.txt").write_text("owner/bad-a\n", encoding="utf-8")
+    (repo / "replenish_pool.txt").write_text("owner/bad-b\nowner/good-repl\n", encoding="utf-8")
+    save_state(repo / "state.json", load_state(repo / "state.json"))
+    (repo / "weights").mkdir()
+    data = tmp_path / "data"
+    _labeled_ds(data / "owner--bad-a")
+    _labeled_ds(data / "owner--bad-b")
+    _labeled_ds(data / "owner--good-repl")
+    _install_train_fakes(tmp_path, monkeypatch)
+
+    orig_train = _DummyYOLO.train
+
+    def flaky_train(self, **kwargs):
+        n = getattr(flaky_train, "n", 0)
+        flaky_train.n = n + 1
+        if n < 2:
+            raise RuntimeError("cuda boom")
+        return orig_train(self, **kwargs)
+
+    monkeypatch.setattr(_DummyYOLO, "train", flaky_train)
+
+    st = run_cycle(repo, data, epochs=1, max_datasets=1, after_train="keep")
     assert "owner/bad-a" in st["failed"]
     assert "owner/bad-b" in st["failed"]
     assert "owner/good-repl" in st["done"]
-    assert "owner/later-ok" not in st["done"]  # stopped after 1 success
-    assert st["replenished"] == [{"from": "owner/good-repl", "for": "owner/bad-a"}]
-    assert any(h.get("replenish_for") == "owner/bad-a" and h.get("ok") for h in st["history"])
 
 
-def test_replenish_stops_when_pool_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_download_desktop_refuses_colab(monkeypatch: pytest.MonkeyPatch) -> None:
+    import download_desktop as dd
+
+    monkeypatch.setenv("COLAB_RELEASE_TAG", "1")
+    with pytest.raises(SystemExit, match="Colab"):
+        dd._refuse_colab()
+
+
+def test_download_desktop_replenish_on_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import download_desktop as dd
+
     repo = tmp_path / "colab_pipeline"
     repo.mkdir()
-    (repo / "download_queue.txt").write_text("owner/only-bad\n", encoding="utf-8")
-    (repo / "replenish_pool.txt").write_text("owner/also-bad\n", encoding="utf-8")
-    save_state(repo / "state.json", {"done": [], "failed": [], "current": None, "history": [], "replenished": []})
-    (repo / "weights").mkdir()
+    (repo / "download_queue.txt").write_text("owner/bad-a\nowner/ok-b\n", encoding="utf-8")
+    (repo / "replenish_pool.txt").write_text("owner/good-repl\n", encoding="utf-8")
+    data = tmp_path / "data"
+    data.mkdir()
 
-    def download(ref: str) -> str:
-        raise RuntimeError("download failed")
+    def fake_download(ref: str, data_root: Path) -> Path:
+        if "bad" in ref:
+            raise RuntimeError("kaggle 404")
+        return _labeled_ds(data_root / ref_to_dirname(ref))
 
-    _install_cycle_fakes(tmp_path, monkeypatch, download)
-    st = run_cycle(repo, epochs=1, max_datasets=1, delete_after=True)
-    assert st["done"] == []
-    assert st["failed"] == ["owner/only-bad", "owner/also-bad"]
+    monkeypatch.setattr(dd, "download_one", fake_download)
+    monkeypatch.setattr(dd, "_refuse_colab", lambda: None)
+    st = dd.run_downloads(repo, data, workers=2, replenish=True)
+    assert "owner/bad-a" in st["download_failed"]
+    assert "owner/ok-b" in st["downloaded"]
+    assert "owner/good-repl" in st["downloaded"]

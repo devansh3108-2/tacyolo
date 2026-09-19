@@ -1,6 +1,9 @@
 {
   "done": [],
   "failed": [],
+  "skipped": [],
+  "downloaded": [],
+  "download_failed": [],
   "current": null,
   "history": [],
   "replenished": []

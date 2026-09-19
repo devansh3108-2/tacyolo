@@ -1,4 +1,8 @@
-"""DET-YOLO one-in/one-out trainer. Used by Colab notebook."""
+"""Offline DET-YOLO trainer. Never calls Kaggle / kagglehub.
+
+Shared by the Windows desktop CLI (`train_offline_loop.py`) and the optional
+Colab notebook (Drive-mounted copy of the same folders).
+"""
 from __future__ import annotations
 
 import json
@@ -17,7 +21,16 @@ IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 def load_state(path: Path) -> dict:
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
-    return {"done": [], "failed": [], "current": None, "history": [], "replenished": []}
+    return {
+        "done": [],
+        "failed": [],
+        "skipped": [],
+        "downloaded": [],
+        "download_failed": [],
+        "current": None,
+        "history": [],
+        "replenished": [],
+    }
 
 
 def save_state(path: Path, st: dict) -> None:
@@ -41,6 +54,47 @@ def git_root(start: Path) -> Path:
         if (cand / ".git").exists():
             return cand
     return p
+
+
+def default_data_root() -> Path:
+    env = os.environ.get("DET_YOLO_DATA")
+    if env:
+        return Path(env)
+    if os.name == "nt":
+        return Path(r"D:\DET-YOLO_kaggle_datasets")
+    return Path.home() / "DET-YOLO_kaggle_datasets"
+
+
+def ref_to_dirname(ref: str) -> str:
+    owner, _, slug = ref.partition("/")
+    return f"{owner}--{slug}" if slug else owner
+
+
+def folder_has_images(root: Path) -> bool:
+    if not root.is_dir():
+        return False
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in IMG_EXT:
+            return True
+    return False
+
+
+def find_dataset_dir(data_root: Path, ref: str) -> Path | None:
+    """Locate an already-local folder for owner/slug. No network."""
+    data_root = Path(data_root)
+    if not data_root.exists():
+        return None
+    owner, _, slug = ref.partition("/")
+    candidates = [
+        data_root / f"{owner}--{slug}",
+        data_root / f"{owner}_{slug}",
+        data_root / owner / slug,
+        data_root / slug,
+    ]
+    for cand in candidates:
+        if folder_has_images(cand):
+            return cand
+    return None
 
 
 def find_pairs(root: Path):
@@ -106,11 +160,31 @@ def delete_path(p: Path | None) -> None:
         shutil.rmtree(p, ignore_errors=True)
 
 
+def archive_or_delete(raw: Path, data_root: Path, after_train: str) -> None:
+    if after_train == "keep":
+        return
+    if after_train == "delete":
+        delete_path(raw)
+        print("deleted local dataset folder")
+        return
+    dest_root = Path(data_root) / "_done"
+    dest_root.mkdir(parents=True, exist_ok=True)
+    dest = dest_root / raw.name
+    if dest.exists():
+        delete_path(dest)
+    try:
+        shutil.move(str(raw), str(dest))
+        print(f"archived -> {dest}")
+    except OSError:
+        delete_path(raw)
+        print("archive failed; deleted local dataset folder")
+
+
 def _seed_base_weights(weights: Path) -> None:
     weights.parent.mkdir(parents=True, exist_ok=True)
     if weights.exists() and weights.stat().st_size > 0:
         return
-    print("seeding yolov8n → weights/DET-YOLO.pt")
+    print("seeding yolov8n -> weights/DET-YOLO.pt")
     from ultralytics import YOLO
 
     model = YOLO("yolov8n.pt")
@@ -167,7 +241,7 @@ def git_push(repo: Path, message: str, force_add: list[Path] | None = None) -> N
         print("nothing to push")
         return
     run(["git", "config", "user.email", "colab-pipeline@local"])
-    run(["git", "config", "user.name", "DET-YOLO Colab Pipeline"])
+    run(["git", "config", "user.name", "DET-YOLO offline pipeline"])
     run(["git", "commit", "-m", message])
     run(["git", "push", "origin", "HEAD"])
 
@@ -180,85 +254,103 @@ def _pop_unused(refs: list[str], used: set[str]) -> str | None:
     return None
 
 
+def _next_ready(refs: list[str], used: set[str], data_root: Path) -> tuple[str | None, Path | None]:
+    while True:
+        ref = _pop_unused(refs, used)
+        if ref is None:
+            return None, None
+        found = find_dataset_dir(data_root, ref)
+        if found is not None:
+            return ref, found
+        print(f"not on disk yet (desktop download still pending): {ref}")
+
+
 def run_cycle(
     repo: Path,
+    data_root: Path | None = None,
     *,
     epochs: int = 8,
     imgsz: int = 640,
     batch: int = 16,
     max_images: int = 8000,
-    skip_if_no_labels: bool = False,
-    delete_after: bool = True,
+    skip_if_no_labels: bool = True,
+    after_train: str = "archive",
     max_datasets: int | None = None,
     replenish: bool = True,
+    push: bool = True,
 ):
-    import kagglehub
+    """Train from folders already on disk. Does not call Kaggle."""
     from ultralytics import YOLO
 
+    if after_train not in {"archive", "delete", "keep"}:
+        raise ValueError("after_train must be archive|delete|keep")
+
     repo = Path(repo)
+    data_root = Path(data_root) if data_root is not None else default_data_root()
     queue_path = repo / "download_queue.txt"
     pool_path = repo / "replenish_pool.txt"
     state_path = repo / "state.json"
     weights = repo / "weights" / "DET-YOLO.pt"
-    work = Path(os.environ.get("DET_YOLO_WORK", "/content/det_yolo_work"))
+    work = Path(os.environ.get("DET_YOLO_WORK", str(data_root / "_work")))
     work.mkdir(parents=True, exist_ok=True)
     yolo_dir = work / "current_yolo"
     runs_dir = work / "runs"
 
+    print(f"OFFLINE TRAIN  data_root={data_root}")
+    print("Kaggle is not used in this process.")
     _seed_base_weights(weights)
 
     st = load_state(state_path)
     st.setdefault("replenished", [])
+    st.setdefault("skipped", [])
     done = set(st.get("done") or [])
     failed = set(st.get("failed") or [])
-    used = set(done) | set(failed)
+    skipped = set(st.get("skipped") or [])
+    used = set(done) | set(failed) | set(skipped)
 
     main_queue = load_queue(queue_path)
     main_set = set(main_queue)
     pending = [r for r in main_queue if r not in used]
     pool = [r for r in load_queue(pool_path) if r not in used and r not in main_set]
 
-    # Aim for successful trains (queue length, typically 150), not attempts.
     success_goal = len(main_queue) if main_queue else 0
     if max_datasets is not None:
         success_goal = min(success_goal, len(done) + max_datasets)
 
     print(
         f"pending_queue={len(pending)} pool={len(pool)} "
-        f"done={len(done)} failed={len(failed)} success_goal={success_goal}"
+        f"done={len(done)} failed={len(failed)} skipped={len(skipped)} "
+        f"success_goal={success_goal}"
     )
 
-    def cleanup(raw: Path | None) -> None:
-        if not delete_after:
-            return
-        if raw is not None:
-            delete_path(raw)
-            try:
-                if raw.parent.name.startswith("versions"):
-                    delete_path(raw.parent.parent)
-            except Exception:
-                pass
+    def cleanup_work() -> None:
         delete_path(yolo_dir)
         delete_path(runs_dir)
-        print("deleted local dataset")
 
-    def attempt(ref: str, *, replenish_for: str | None = None) -> bool:
+    def record_and_maybe_push(message: str, force_add: list[Path] | None = None) -> None:
+        save_state(state_path, st)
+        if not push:
+            return
+        try:
+            git_push(repo, message, force_add=force_add)
+        except Exception as pe:
+            print("git push skipped:", pe)
+
+    def attempt(ref: str, raw: Path, *, replenish_for: str | None = None) -> str:
+        """Return 'ok', 'skip' (no labels / not usable), or 'fail'."""
         print("\n" + "=" * 60)
         tag = f"replenish for {replenish_for}" if replenish_for else "queue"
-        print(f"{ref}  [{tag}]  done={len(done)}/{success_goal}")
+        print(f"{ref}  [{tag}]  folder={raw}  done={len(done)}/{success_goal}")
         st["current"] = ref
         save_state(state_path, st)
-        raw = None
         t0 = time.time()
         try:
-            print("download…")
-            raw = Path(kagglehub.dataset_download(ref))
             yaml_path, n_img, n_lab = build_yolo_set(raw, yolo_dir, max_images)
             print(f"built images={n_img} labeled={n_lab}")
-            if skip_if_no_labels and n_lab < 1:
-                raise RuntimeError("no labels")
             if n_img < 1:
                 raise RuntimeError("no images")
+            if skip_if_no_labels and n_lab < 1:
+                raise RuntimeError("no labels")
             model = YOLO(str(weights))
             model.train(
                 data=str(yaml_path),
@@ -271,7 +363,7 @@ def run_cycle(
                 patience=5,
                 verbose=True,
                 plots=False,
-                workers=2,
+                workers=0 if os.name == "nt" else 2,
             )
             best = runs_dir / "det_pipe" / "weights" / "best.pt"
             last = runs_dir / "det_pipe" / "weights" / "last.pt"
@@ -295,61 +387,75 @@ def run_cycle(
             done.add(ref)
             used.add(ref)
             st["current"] = None
-            save_state(state_path, st)
             msg = f"train: {ref} (+{n_img} imgs, {epochs} ep)"
             if replenish_for:
                 msg = f"train: {ref} (replenish for {replenish_for}, +{n_img} imgs, {epochs} ep)"
-            git_push(repo, msg, force_add=[weights])
-            return True
+            record_and_maybe_push(msg, force_add=[weights])
+            return "ok"
         except Exception as e:
-            print("FAIL", ref, e)
-            st.setdefault("failed", []).append(ref)
+            err = str(e)[:400]
+            no_labels = "no labels" in err.lower()
+            print("SKIP" if no_labels else "FAIL", ref, e)
+            if no_labels:
+                print(
+                    "REPLENISH NOTE: no YOLO labels in this folder. "
+                    "Desktop download should pull the next unused slug from replenish_pool.txt "
+                    "if it is not already on disk; this trainer will use that folder next."
+                )
+                st.setdefault("skipped", []).append(ref)
+                skipped.add(ref)
+                bucket = "skipped"
+            else:
+                st.setdefault("failed", []).append(ref)
+                failed.add(ref)
+                bucket = "failed"
             rec = {
                 "ref": ref,
                 "ok": False,
-                "error": str(e)[:400],
+                "error": err,
                 "at": datetime.now(timezone.utc).isoformat(),
             }
             if replenish_for:
                 rec["replenish_for"] = replenish_for
             st.setdefault("history", []).append(rec)
-            failed.add(ref)
             used.add(ref)
             st["current"] = None
-            save_state(state_path, st)
-            try:
-                git_push(repo, f"fail: {ref}")
-            except Exception as pe:
-                print("push after fail skipped:", pe)
-            return False
+            record_and_maybe_push(f"{'skip' if no_labels else 'fail'}: {ref}")
+            return "skip" if no_labels else "fail"
         finally:
-            cleanup(raw)
+            try:
+                archive_or_delete(raw, data_root, after_train)
+            except Exception as ce:
+                print("post-train folder cleanup skipped:", ce)
+            cleanup_work()
             st["current"] = None
             save_state(state_path, st)
 
+    def try_replenish(failed_orig: str) -> str:
+        if not replenish:
+            return "empty"
+        while True:
+            repl, rdir = _next_ready(pool, used, data_root)
+            if repl is None:
+                print(f"no local replenish folder after {failed_orig}")
+                return "empty"
+            print(f"REPLENISH after {failed_orig} -> {repl}")
+            result = attempt(repl, rdir, replenish_for=failed_orig)
+            if result == "ok":
+                return "ok"
+
     while len(done) < success_goal:
-        ref = _pop_unused(pending, used)
-        source = "queue"
+        ref, raw = _next_ready(pending, used, data_root)
         replenish_for = None
         if ref is None and replenish:
-            # Backfill remaining success deficit from the pool (old fails / exhausted queue).
-            ref = _pop_unused(pool, used)
-            source = "replenish"
+            ref, raw = _next_ready(pool, used, data_root)
             replenish_for = None
-        if ref is None:
-            print("no more slugs (queue + replenish pool empty)")
+        if ref is None or raw is None:
+            print("no more ready local folders (download more on desktop, then re-run)")
             break
+        result = attempt(ref, raw, replenish_for=replenish_for)
+        if result != "ok":
+            try_replenish(ref)
 
-        ok = attempt(ref, replenish_for=replenish_for)
-        # FAIL → immediately pull replacements until a train succeeds or the pool is empty.
-        failed_orig = ref
-        while (not ok) and replenish:
-            repl = _pop_unused(pool, used)
-            if repl is None:
-                print(f"replenish pool empty after FAIL {failed_orig}")
-                break
-            print(f"REPLENISH after FAIL {failed_orig} → {repl}")
-            ok = attempt(repl, replenish_for=failed_orig)
-
-    print("PIPELINE PASS COMPLETE", f"done={len(done)} failed={len(failed)}")
+    print("PIPELINE PASS COMPLETE", f"done={len(done)} failed={len(failed)} skipped={len(skipped)}")
     return st
