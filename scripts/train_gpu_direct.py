@@ -78,20 +78,48 @@ def train_gpu_direct(
                 print("\n👉 Please run scripts/prepare_tiles_cpu.py first to generate the tiles on Google Drive.")
                 sys.exit(1)
 
-    # Resume from existing best.pt if present on Drive, else base model
+    # Detect any already done training checkpoints on Google Drive
+    last_on_drive = layout.trained_weights / "last.pt"
     best_on_drive = layout.trained_weights / "best.pt"
-    starting_weights = str(best_on_drive) if best_on_drive.exists() else model_name
+    run_last = layout.working_testing / "runs" / "gpu_direct_train" / "weights" / "last.pt"
+    run_best = layout.working_testing / "runs" / "gpu_direct_train" / "weights" / "best.pt"
+
+    resume_flag = False
+    if run_last.exists():
+        starting_weights = str(run_last)
+        resume_flag = True
+        print(f"🔄 Resuming from already done training checkpoint: {run_last}")
+    elif last_on_drive.exists():
+        starting_weights = str(last_on_drive)
+        resume_flag = True
+        print(f"🔄 Resuming from already done training checkpoint on Drive: {last_on_drive}")
+    elif best_on_drive.exists():
+        starting_weights = str(best_on_drive)
+        print(f"🌟 Fine-tuning on top of already done best model: {best_on_drive}")
+    elif run_best.exists():
+        starting_weights = str(run_best)
+        print(f"🌟 Fine-tuning on top of already done best model: {run_best}")
+    else:
+        found_pts = [p for p in layout.root.rglob("*.pt") if ("best" in p.name.lower() or "last" in p.name.lower()) and "pretrained" not in str(p)]
+        if found_pts:
+            starting_weights = str(found_pts[0])
+            print(f"🌟 Found existing trained model on Drive: {starting_weights}")
+        else:
+            starting_weights = model_name
 
     print("=================================================================")
     print("🔥 STAGE 2: PURE A100 GPU TRAINING (DIRECT DRIVE STREAMING)")
     print(f"📁 Dataset YAML: {data_yaml}")
-    print(f"🏋️ Starting Weights: {starting_weights}")
+    print(f"🏋️ Active Weights: {starting_weights}")
+    print(f"⏩ Resuming Previous Training: {resume_flag}")
     print(f"⚡ Batch Size: {batch_size} | Epochs: {epochs} | Resolution: {imgsz}x{imgsz}")
     print("=================================================================\n")
 
     from ultralytics import YOLO
 
-    if "world" in str(starting_weights).lower():
+    if resume_flag:
+        model = YOLO(starting_weights)
+    elif "world" in str(starting_weights).lower():
         try:
             from ultralytics import YOLOWorld
             model = YOLOWorld(starting_weights)
@@ -113,17 +141,22 @@ def train_gpu_direct(
         exist_ok=True,
         device="cuda:0" if os.system("nvidia-smi > /dev/null 2>&1") == 0 else "cpu",
         workers=8,
-        cache="disk",  # Cache directly for high-speed epochs
+        resume=resume_flag,
+        cache="disk",
     )
 
     # Save to trained_weights on Drive
     trained_best = project_dir / "gpu_direct_train" / "weights" / "best.pt"
+    trained_last = project_dir / "gpu_direct_train" / "weights" / "last.pt"
     if trained_best.exists():
         shutil.copy2(trained_best, layout.trained_weights / "best.pt")
-        shutil.copy2(trained_best, layout.trained_weights / "tactical_yolo11s.pt")
+        shutil.copy2(trained_best, layout.trained_weights / "tactical_yolo.pt")
         print("\n=================================================================")
-        print(f"🎉 TRAINING COMPLETE! Best weights saved to:")
+        print(f"🎉 TRAINING COMPLETE! Best weights saved to Drive:")
         print(f"⭐ {layout.trained_weights / 'best.pt'}")
+    if trained_last.exists():
+        shutil.copy2(trained_last, layout.trained_weights / "last.pt")
+        print(f"💾 Checkpoint last.pt saved to Drive: {layout.trained_weights / 'last.pt'}")
         print("=================================================================")
 
     return layout.trained_weights / "best.pt"
