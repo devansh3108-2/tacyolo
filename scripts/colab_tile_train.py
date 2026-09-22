@@ -33,6 +33,30 @@ DEFAULT_KAGGLE_TACTICAL_DATASETS = [
     {"ref": "kausthubkannan/thermal-image-people-detection", "tag": "thermal_ppl", "cls_map": {0: 0}},
 ]
 
+# UNIFIED 4-IN-1: Drones + CCTV Surveillance + Google Open Images + Foundation Vocabulary
+UNIFIED_4_IN_1_DATASETS = [
+    # --- Pillar 1: Drone & Overhead Aerial (DOTA / VisDrone / UAV Military) ---
+    {"ref": "banuprasadb/visdrone-dataset", "tag": "p1_visdrone_aerial", "cls_map": {0: 0, 1: 0, 2: 1, 3: 2, 4: 2, 5: 5, 8: 4, 9: 3}},
+    {"ref": "sshikamaru/drone-yolo-detection", "tag": "p1_drone_yolo", "cls_map": {0: 7}},
+    {"ref": "muki2003/yolo-drone-detection-dataset", "tag": "p1_drone_muki", "cls_map": {0: 7}},
+    {"ref": "troykueh/multi-class-drone-detection-dataset-yolov8-ready", "tag": "p1_drone_mcd", "cls_map": {0: 7}},
+    {"ref": "caferfatihgltekin/air-defense-object-detection-dataset-yolov8", "tag": "p1_air_defense", "cls_map": {0: 6, 1: 10, 2: 7, 3: 6}},
+    {"ref": "simuletic/uav-and-aerial-view-battle-tank-detection-dataset", "tag": "p1_tank_uav", "cls_map": {0: 8, 1: 9}},
+    {"ref": "sudipchakrabarty/kiit-mita", "tag": "p1_kiit_mita", "cls_map": {0: 8, 1: 7, 2: 0, 3: 6, 4: 10, 5: 9}},
+
+    # --- Pillar 2: CCTV & Adverse Weather Surveillance (BDD100K / Night FLIR / Crowds) ---
+    {"ref": "solomonk/berkeley-deepdrive-bdd100k-yolo", "tag": "p2_bdd100k_cctv", "cls_map": {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5}},
+    {"ref": "gaweshgomes/llvip-rgb-thermal-yolo-format", "tag": "p2_thermal_llvip", "cls_map": {0: 0}},
+    {"ref": "pandrii000/hituav-a-highaltitude-infrared-thermal-dataset", "tag": "p2_thermal_hit", "cls_map": {0: 0, 1: 2, 2: 1, 3: 5}},
+    {"ref": "niteshc7r/datasets-for-object-detection-night-and-thermal", "tag": "p2_night_thermal", "cls_map": {0: 0, 1: 2, 2: 5}},
+    {"ref": "kausthubkannan/thermal-image-people-detection", "tag": "p2_thermal_ppl", "cls_map": {0: 0}},
+
+    # --- Pillar 3: Universal Object Detection (Google Open Images / Broad Classes) ---
+    {"ref": "ashishjangra27/open-images-dataset-v7-validation", "tag": "p3_openimages_v7", "cls_map": {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10}},
+    {"ref": "arashnic/open-images-dataset-v6-sample", "tag": "p3_openimages_sample", "cls_map": {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10}},
+]
+
+
 CLASS_NAMES = [
     "person", "bicycle", "car", "motorcycle", "bus",
     "truck", "airplane", "drone", "tank", "armored_car", "helicopter"
