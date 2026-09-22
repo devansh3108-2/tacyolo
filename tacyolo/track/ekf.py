@@ -28,11 +28,13 @@ class KalmanTrack:
         self.class_name = det.class_name
         self.hdc_class = det.hdc_class
         self.hdc_score = det.hdc_score
+        self.hdc_hv = det.hdc_hv.copy() if det.hdc_hv is not None else None
         self.hits = 1
         self.age = 0
         self.time_since_update = 0
         self.x = np.array([x, y, 0.0, 0.0], dtype=np.float32)
         self.P = np.diag([meas_var, meas_var, 100.0, 100.0]).astype(np.float32)
+
         self.Q_base = float(process_var)
         self.R = np.eye(2, dtype=np.float32) * float(meas_var)
         self.R_radar = np.eye(2, dtype=np.float32) * float(radar_var)
@@ -81,8 +83,17 @@ class KalmanTrack:
         if det.hdc_class:
             self.hdc_class = det.hdc_class
             self.hdc_score = det.hdc_score
+        if det.hdc_hv is not None:
+            if self.hdc_hv is not None:
+                self.hdc_hv = 0.8 * self.hdc_hv + 0.2 * det.hdc_hv
+                norm = float(np.linalg.norm(self.hdc_hv))
+                if norm > 1e-6:
+                    self.hdc_hv = self.hdc_hv / norm
+            else:
+                self.hdc_hv = det.hdc_hv.copy()
         self.hits += 1
         self.time_since_update = 0
+
 
     def update_radar(self, xy: tuple[float, float]) -> None:
         z = np.array(xy, dtype=np.float32)

@@ -3,10 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 import cv2
 import numpy as np
 
 from tacyolo.hdc.encode import HDEncoder, cosine
+
+if TYPE_CHECKING:
+    from tacyolo.types import Detection
+
 
 
 def crop_features(crop: np.ndarray, radar: np.ndarray | None = None) -> np.ndarray:
@@ -125,3 +131,15 @@ class ItemMemory:
         if best < self.min_cosine:
             return HDCMatch(None, best, margin, scores)
         return HDCMatch(best_name, best, margin, scores)
+
+    def annotate_detection(self, det: "Detection", radar: np.ndarray | None = None) -> "Detection":
+        """Compute and attach HDC hypervector and gallery matching scores to a Detection."""
+        if det.crop is not None and getattr(det.crop, "size", 0) > 0:
+            hv = self.encode_observation(det.crop, radar)
+            det.hdc_hv = hv
+            match_res = self.match(det.crop, radar)
+            det.hdc_class = match_res.class_name
+            det.hdc_score = match_res.score
+            det.hdc_margin = match_res.margin
+        return det
+

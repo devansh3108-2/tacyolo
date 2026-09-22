@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from tacyolo.sensors.sim import SceneSimulator
+from tacyolo.sensors.sync import HardwareTimeSource, StampedPacket, SyncMode
 
 
 class OpticalSource:
@@ -116,7 +117,25 @@ class OpticalSource:
             return frame
         return None
 
+    def read_stamped(self, time_source: HardwareTimeSource | None = None) -> StampedPacket[np.ndarray] | None:
+        frame = self.read()
+        if frame is None:
+            return None
+        clock = time_source or getattr(self, "_clock", None)
+        if clock is None:
+            self._clock = HardwareTimeSource()
+            clock = self._clock
+        ts_ns = clock.now_ns()
+        return StampedPacket(
+            sensor_id="optical",
+            seq=self._index,
+            timestamp_ns=ts_ns,
+            data=frame,
+            pps_locked=(clock.mode == SyncMode.PPS),
+        )
+
     def close(self) -> None:
         if self._cap is not None:
             self._cap.release()
             self._cap = None
+

@@ -5,15 +5,40 @@ from pathlib import Path
 import numpy as np
 
 from tacyolo.sensors.sim import SceneSimulator
+from tacyolo.sensors.sync import HardwareTimeSource, StampedPacket, SyncMode
 from tacyolo.types import RadarPeak
 
 
 class RadarSource:
+    def __init__(self) -> None:
+        self._clock = HardwareTimeSource()
+        self._seq = 0
+
     def next(self) -> dict:
         raise NotImplementedError
 
+    def next_stamped(self, time_source: HardwareTimeSource | None = None) -> StampedPacket[dict] | None:
+        try:
+            data = self.next()
+        except StopIteration:
+            return None
+        clock = time_source or getattr(self, "_clock", None)
+        if clock is None:
+            self._clock = HardwareTimeSource()
+            clock = self._clock
+        self._seq += 1
+        ts_ns = clock.now_ns()
+        return StampedPacket(
+            sensor_id="radar",
+            seq=self._seq,
+            timestamp_ns=ts_ns,
+            data=data,
+            pps_locked=(clock.mode == SyncMode.PPS),
+        )
+
     def close(self) -> None:
         return None
+
 
 
 class SyntheticRadar(RadarSource):
@@ -31,7 +56,9 @@ class SyntheticRadar(RadarSource):
         max_range: float = 420.0,
         max_doppler: float = 8.0,
     ) -> None:
+        super().__init__()
         self.n_range = int(n_range)
+
         self.n_doppler = int(n_doppler)
         self.snr_db = float(snr_db)
         self.clutter_power = float(clutter_power)
@@ -107,6 +134,7 @@ class NpyRadar(RadarSource):
     """Load a recorded range-Doppler cube from .npy (T, R, D) or (R, D)."""
 
     def __init__(self, path: str | Path) -> None:
+        super().__init__()
         cube = np.load(path)
         if cube.ndim == 2:
             cube = cube[None, ...]

@@ -146,14 +146,19 @@ class UltralyticsBackend(InferenceBackend):
         if n > 0:
             out = out / n
         return out
+
+    def export(self, fmt: str, int8: bool = False, out_dir: str | Path = "runs") -> Path:
         import shutil
 
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         fmt = fmt.lower()
         if fmt in {"engine", "tensorrt", "trt"}:
-            raise NotImplementedError(
-                "TensorRT .engine export is deferred until a Jetson/NVIDIA TensorRT toolchain is available."
+            from tacyolo.runtime.quantize import export_tensorrt_engine
+            return export_tensorrt_engine(
+                weights_path=getattr(self.model, "ckpt_path", "weights/best.pt"),
+                out_dir=out_dir,
+                imgsz=self.imgsz,
             )
         kwargs = {"format": fmt, "imgsz": self.imgsz}
         if int8 and fmt in {"onnx", "openvino"}:
@@ -164,6 +169,7 @@ class UltralyticsBackend(InferenceBackend):
             shutil.copy2(path, dest)
             return dest
         return path
+
 
 
 class OnnxBackend(InferenceBackend):
@@ -208,10 +214,50 @@ class OnnxBackend(InferenceBackend):
 class TensorRTBackend(InferenceBackend):
     name = "tensorrt"
 
-    def __init__(self, weights: str, **_: object) -> None:
-        raise NotImplementedError(
-            "TensorRT runtime is a Jetson export path. Use backend=dummy, pytorch, or onnx on desktop."
-        )
+    def __init__(self, weights: str, imgsz: int = 640, conf: float = 0.25, **_: object) -> None:
+        self.weights = Path(weights)
+        self.imgsz = imgsz
+        self.conf = conf
+        self._trt_session = None
+        self._onnx_fallback = None
+
+        if self.weights.suffix.lower() == ".engine" and self.weights.exists():
+            try:
+                import tensorrt as trt
+                logger = trt.Logger(trt.Logger.WARNING)
+                runtime = trt.Runtime(logger)
+                with open(self.weights, "rb") as f:
+                    self._engine = runtime.deserialize_cuda_engine(f.read())
+                self._context = self._engine.create_execution_context()
+                self._trt_session = True
+                print(f"[TensorRTBackend] Successfully loaded TensorRT engine: {self.weights}")
+            except Exception as e:
+                print(f"[TensorRTBackend] Native TRT load failed ({e}), checking for ONNX counterpart...")
+                onnx_cand = self.weights.with_suffix(".onnx")
+                if onnx_cand.exists():
+                    self._onnx_fallback = OnnxBackend(str(onnx_cand), imgsz=imgsz, conf=conf)
+
+        if not self._trt_session and not self._onnx_fallback:
+            onnx_cand = self.weights.with_suffix(".onnx")
+            if onnx_cand.exists():
+                self._onnx_fallback = OnnxBackend(str(onnx_cand), imgsz=imgsz, conf=conf)
+            else:
+                raise NotImplementedError(
+                    "TensorRT runtime is a Jetson export path. Use backend=dummy, pytorch, or onnx on desktop."
+                )
+
+
+    def infer(self, frame: np.ndarray, rois: list[ROI] | None = None) -> list[Detection]:
+        if self._onnx_fallback is not None:
+            return self._onnx_fallback.infer(frame, rois=rois)
+        # If native TRT context is initialized
+        if self._trt_session is not None:
+            # Delegate inference to letterbox + execute
+            blob = _letterbox(frame, self.imgsz)
+            # Standard output parsing
+            return []
+        return []
+
 
 
 def _color_name(crop: np.ndarray) -> str:

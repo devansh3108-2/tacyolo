@@ -49,6 +49,8 @@ class Detection:
     hdc_score: float | None = None
     hdc_margin: float | None = None
     crop: np.ndarray | None = None
+    hdc_hv: np.ndarray | None = None
+
 
     @property
     def xyxy(self) -> tuple[float, float, float, float]:
