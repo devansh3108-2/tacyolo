@@ -299,52 +299,141 @@ class ColabBatchStreamingTrainer:
             print(f"[Training] Updated best weights at: {self.layout.trained_weights / 'best.pt'}")
         return self.layout.trained_weights / "best.pt"
 
-    def run_pipeline(self, max_batches: int | None = None, epochs_per_batch: int = 15) -> None:
+    def run_pipeline(
+        self,
+        max_batches: int | None = None,
+        epochs_per_batch: int = 5,
+        manifest_path: str | Path | None = None,
+        auto_discover: int | None = None,
+    ) -> None:
         state = self.layout.load_state()
-        datasets = DEFAULT_KAGGLE_TACTICAL_DATASETS
-        start_idx = state.get("current_batch_index", 0)
 
-        for i in range(start_idx, len(datasets)):
+        if manifest_path and Path(manifest_path).exists():
+            print(f"[Manifest] Loading batch list from manifest: {manifest_path}")
+            datasets = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        elif auto_discover and auto_discover > 0:
+            print(f"[Auto-Discover] Dynamically discovering {auto_discover} tactical datasets from Kaggle...")
+            datasets = discover_kaggle_datasets(count=auto_discover)
+            # Cache manifest to Drive and local
+            manifest_cache = self.layout.root / f"manifest_{len(datasets)}_batches.json"
+            manifest_cache.write_text(json.dumps(datasets, indent=2), encoding="utf-8")
+            print(f"[Auto-Discover] Discovered {len(datasets)} batches! Saved manifest to {manifest_cache}")
+        else:
+            datasets = DEFAULT_KAGGLE_TACTICAL_DATASETS
+
+        start_idx = state.get("current_batch_index", 0)
+        total_to_run = len(datasets)
+        print(f"[Pipeline] Ready to stream {total_to_run} total batches. Starting from index {start_idx}.")
+
+        for i in range(start_idx, total_to_run):
             if max_batches is not None and (i - start_idx) >= max_batches:
                 break
             ds = datasets[i]
             ref = ds["ref"]
-            tag = ds["tag"]
-            cls_map = ds["cls_map"]
+            tag = ds.get("tag", ref.replace("/", "_"))
+            cls_map = ds.get("cls_map", {0: 7})
 
             print(f"\n==========================================")
-            print(f"Starting Streaming Batch {i+1}/{len(datasets)}: {ref} [{tag}]")
+            print(f"Starting Streaming Batch {i+1}/{total_to_run}: {ref} [{tag}]")
             print(f"==========================================")
 
             raw_dir = self.layout.raw_data / tag
-            self.download_kaggle_batch(ref, raw_dir)
-            yaml_path = self.prepare_tiled_batch(raw_dir, tag, cls_map)
-
-            best_weights = self.train_batch(yaml_path, epochs=epochs_per_batch)
-
-            # Auto-purge raw and tile files
-            self.purge_batch_data(raw_dir, tag)
+            try:
+                self.download_kaggle_batch(ref, raw_dir)
+                yaml_path = self.prepare_tiled_batch(raw_dir, tag, cls_map)
+                best_weights = self.train_batch(yaml_path, epochs=epochs_per_batch)
+            except Exception as e:
+                print(f"[Batch Error] Batch {tag} ({ref}) failed: {e}. Skipping to next batch...")
+            finally:
+                # Always purge raw and tile files to guarantee storage recycling
+                self.purge_batch_data(raw_dir, tag)
 
             state["completed_batches"].append(tag)
             state["current_batch_index"] = i + 1
             self.layout.save_state(state)
 
-        print("\nAll batches completed successfully!")
+        print("\nAll requested streaming batches completed successfully!")
+
+
+def discover_kaggle_datasets(count: int = 500) -> list[dict]:
+    """Query Kaggle search API across defense and tactical domains to assemble up to `count` datasets."""
+    import urllib.parse
+    import urllib.request
+
+    queries = [
+        "drone yolo", "uav detection", "air defense", "thermal infrared yolo",
+        "flir yolo", "military aircraft", "tank yolo", "aerial object detection",
+        "visdrone", "satellite yolo", "soldier detection", "infrared detection",
+        "aerial surveillance", "uav tracking", "drone classification"
+    ]
+    seen = set()
+    found: list[dict] = []
+
+    # Include curated base tactical datasets first
+    for ds in DEFAULT_KAGGLE_TACTICAL_DATASETS:
+        seen.add(ds["ref"])
+        found.append(ds)
+
+    for q in queries:
+        if len(found) >= count:
+            break
+        for page in range(1, 8):
+            if len(found) >= count:
+                break
+            url = f"https://www.kaggle.com/api/v1/datasets/list?search={urllib.parse.quote(q)}&pageSize=50&page={page}"
+            req = urllib.request.Request(url, headers={"User-Agent": "tacyolo"})
+            try:
+                items = json.loads(urllib.request.urlopen(req, timeout=10).read())
+                if not items:
+                    break
+                for item in items:
+                    ref = item.get("ref")
+                    if ref and ref not in seen:
+                        seen.add(ref)
+                        found.append({
+                            "ref": ref,
+                            "tag": ref.replace("/", "_"),
+                            "cls_map": {0: 7},
+                        })
+                        if len(found) >= count:
+                            break
+            except Exception:
+                break
+    return found
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="TACYOLO Colab & Drive Batch Streaming Trainer")
     parser.add_argument("--drive-root", default="/content/drive/MyDrive/TACYOLO", help="Root path in Google Drive")
     parser.add_argument("--tile-size", type=int, default=640, help="Tile resolution for small object detection")
-    parser.add_argument("--epochs", type=int, default=15, help="Epochs per batch")
+    parser.add_argument("--epochs", type=int, default=5, help="Epochs per batch (recommended 3-5 for 500 batches)")
     parser.add_argument("--max-batches", type=int, default=None, help="Max batches to process in this run")
+    parser.add_argument("--manifest", default=None, help="Path to JSON manifest listing custom batches")
+    parser.add_argument("--auto-discover", type=int, default=None, help="Auto-discover N tactical datasets from Kaggle")
+    parser.add_argument("--generate-manifest", type=str, default=None, help="Save discovered manifest to file and exit")
     args = parser.parse_args()
+
+    if args.generate_manifest:
+        target = args.auto_discover or 500
+        print(f"Generating manifest of {target} Kaggle tactical datasets -> {args.generate_manifest}...")
+        ds_list = discover_kaggle_datasets(count=target)
+        out_p = Path(args.generate_manifest)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(ds_list, indent=2), encoding="utf-8")
+        print(f"Manifest written with {len(ds_list)} batches to {out_p}")
+        return 0
 
     layout = DriveLayout(args.drive_root)
     trainer = ColabBatchStreamingTrainer(layout=layout, tile_size=args.tile_size)
-    trainer.run_pipeline(max_batches=args.max_batches, epochs_per_batch=args.epochs)
+    trainer.run_pipeline(
+        max_batches=args.max_batches,
+        epochs_per_batch=args.epochs,
+        manifest_path=args.manifest,
+        auto_discover=args.auto_discover,
+    )
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
