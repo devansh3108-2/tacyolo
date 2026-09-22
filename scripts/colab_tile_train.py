@@ -36,6 +36,7 @@ DEFAULT_KAGGLE_TACTICAL_DATASETS = [
 # UNIFIED 4-IN-1: Drones + CCTV Surveillance + Google Open Images + Foundation Vocabulary
 UNIFIED_4_IN_1_DATASETS = [
     # --- Pillar 1: Drone & Overhead Aerial (DOTA / VisDrone / UAV Military) ---
+    {"ref": "chandlertimm/dota-data", "tag": "p1_dota_aerial", "cls_map": {0: 6, 1: 8, 2: 8, 3: 5, 4: 2, 5: 10}},
     {"ref": "banuprasadb/visdrone-dataset", "tag": "p1_visdrone_aerial", "cls_map": {0: 0, 1: 0, 2: 1, 3: 2, 4: 2, 5: 5, 8: 4, 9: 3}},
     {"ref": "sshikamaru/drone-yolo-detection", "tag": "p1_drone_yolo", "cls_map": {0: 7}},
     {"ref": "muki2003/yolo-drone-detection-dataset", "tag": "p1_drone_muki", "cls_map": {0: 7}},
@@ -119,15 +120,43 @@ class ImageTiler:
         h, w = img.shape[:2]
 
         boxes: list[tuple[int, float, float, float, float]] = []
+        dota_class_map = {
+            "plane": 6, "ship": 8, "storage-tank": 8, "baseball-diamond": 1,
+            "tennis-court": 1, "basketball-court": 1, "ground-track-field": 1,
+            "harbor": 8, "bridge": 8, "large-vehicle": 5, "small-vehicle": 2,
+            "helicopter": 10, "roundabout": 2, "soccer-ball-field": 1, "swimming-pool": 1,
+            "container-crane": 5, "airport": 6, "helipad": 10
+        }
         if label_path and label_path.exists():
-            for line in label_path.read_text(encoding="utf-8").splitlines():
+            for line in label_path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 parts = line.strip().split()
-                if len(parts) >= 5:
-                    cls_id = int(parts[0])
-                    xc, yc, bw, bh = [float(p) for p in parts[1:5]]
-                    if class_map and cls_id in class_map:
-                        cls_id = class_map[cls_id]
-                    boxes.append((cls_id, xc, yc, bw, bh))
+                if len(parts) == 5:
+                    try:
+                        cls_id = int(parts[0])
+                        xc, yc, bw, bh = [float(p) for p in parts[1:5]]
+                        if class_map and cls_id in class_map:
+                            cls_id = class_map[cls_id]
+                        boxes.append((cls_id, xc, yc, bw, bh))
+                    except ValueError:
+                        pass
+                elif len(parts) >= 9:
+                    try:
+                        pts = [float(p) for p in parts[:8]]
+                        xs = pts[0::2]
+                        ys = pts[1::2]
+                        min_x, max_x = min(xs), max(xs)
+                        min_y, max_y = min(ys), max(ys)
+                        bw = (max_x - min_x) / max(1, w)
+                        bh = (max_y - min_y) / max(1, h)
+                        xc = (min_x + max_x) / (2.0 * max(1, w))
+                        yc = (min_y + max_y) / (2.0 * max(1, h))
+                        cat_str = parts[8].lower()
+                        cls_id = dota_class_map.get(cat_str, 2)
+                        if class_map and cls_id in class_map:
+                            cls_id = class_map[cls_id]
+                        boxes.append((cls_id, xc, yc, bw, bh))
+                    except Exception:
+                        pass
 
         # If already equal or smaller than tile size, copy directly
         if h <= self.tile_size and w <= self.tile_size:

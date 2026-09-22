@@ -70,6 +70,7 @@ def prepare_and_tile_all(
     drive_root: str | Path = "/content/drive/MyDrive/TACYOLO",
     tile_size: int = 640,
     auto_discover: int | None = None,
+    dataset_ref: str | None = None,
 ) -> Path:
     layout = DriveLayout(drive_root)
     check_drive_mounted(layout.root)
@@ -98,7 +99,10 @@ def prepare_and_tile_all(
     yaml_path.write_text(yaml.dump(yaml_content, sort_keys=False), encoding="utf-8")
 
     datasets_to_process = UNIFIED_4_IN_1_DATASETS
-    if auto_discover:
+    if dataset_ref:
+        print(f"🎯 Target dataset specified: {dataset_ref}")
+        datasets_to_process = [{"ref": dataset_ref, "tag": dataset_ref.replace("/", "_"), "cls_map": None}]
+    elif auto_discover:
         print(f"🌐 Querying Kaggle for {auto_discover} tactical datasets across all 4 pillars...")
         datasets_to_process = discover_kaggle_datasets(count=auto_discover)
 
@@ -232,9 +236,15 @@ def main() -> int:
     parser.add_argument("--drive-root", default="/content/drive/MyDrive/TACYOLO", help="Google Drive Root Path")
     parser.add_argument("--tile-size", type=int, default=640, help="Tile resolution")
     parser.add_argument("--auto-discover", type=int, default=None, help="Auto-discover N tactical datasets from Kaggle (e.g. 500)")
+    parser.add_argument("--dataset", default=None, help="Process a specific Kaggle dataset (e.g. chandlertimm/dota-data)")
     args = parser.parse_args()
 
-    prepare_and_tile_all(drive_root=args.drive_root, tile_size=args.tile_size, auto_discover=args.auto_discover)
+    prepare_and_tile_all(
+        drive_root=args.drive_root,
+        tile_size=args.tile_size,
+        auto_discover=args.auto_discover,
+        dataset_ref=args.dataset,
+    )
     return 0
 
 
