@@ -44,12 +44,35 @@ except ImportError:
 
 
 
+def check_drive_mounted(drive_root: Path) -> None:
+    path_str = str(drive_root.resolve()).replace("\\", "/")
+    if "/content/drive" in path_str:
+        if not os.path.exists("/content/drive/MyDrive"):
+            try:
+                from google.colab import drive
+                print("⚠️ Google Drive not mounted yet. Attempting drive.mount('/content/drive')...")
+                drive.mount("/content/drive")
+            except Exception as e:
+                print(f"Auto-mount attempt: {e}")
+
+        if not os.path.exists("/content/drive/MyDrive"):
+            raise RuntimeError(
+                "\n❌ CRITICAL: Google Drive is NOT mounted!\n"
+                "If you continue, files will be saved to temporary VM storage and LOST when you switch runtimes.\n"
+                "Please run this in a cell first:\n\n"
+                "    from google.colab import drive\n"
+                "    drive.mount('/content/drive')\n"
+            )
+        print("✅ Google Drive mount verified: /content/drive/MyDrive is active and persistent.")
+
+
 def prepare_and_tile_all(
     drive_root: str | Path = "/content/drive/MyDrive/TACYOLO",
     tile_size: int = 640,
     auto_discover: int | None = None,
 ) -> Path:
     layout = DriveLayout(drive_root)
+    check_drive_mounted(layout.root)
     layout.setup()
     tiler = ImageTiler(tile_size=tile_size)
 
@@ -86,7 +109,7 @@ def prepare_and_tile_all(
     # Auto-seed completed datasets if existing tiles are found from the previous run
     existing_tile_count = sum(1 for _ in master_train_imgs.glob("*.*"))
     if existing_tile_count > 1000 and not completed_datasets:
-        print(f"📦 Detected {existing_tile_count} existing tiles from previous run. Auto-registering initial 14 datasets as completed...")
+        print(f"📦 Detected {existing_tile_count} existing tiles from previous run. Auto-registering initial datasets as completed...")
         for b_ds in UNIFIED_4_IN_1_DATASETS:
             completed_datasets.add(b_ds["ref"])
             completed_datasets.add(b_ds.get("tag", b_ds["ref"].replace("/", "_")))
@@ -103,6 +126,8 @@ def prepare_and_tile_all(
 
     total_tiles = existing_tile_count
     t0_all = time.time()
+
+    from concurrent.futures import ThreadPoolExecutor
 
     for idx, ds in enumerate(datasets_to_process, 1):
         ref = ds["ref"]
@@ -134,15 +159,15 @@ def prepare_and_tile_all(
             os.system(f"kaggle datasets download -d {ref} -p '{stage_raw_dir}' --unzip")
 
         raw_size = get_dir_size_gb(stage_raw_dir)
-        print(f"[{idx}/{len(datasets_to_process)}] 🔪 Tiling {raw_size:.2f} GB of images for {tag}...")
+        print(f"[{idx}/{len(datasets_to_process)}] 🔪 Tiling {raw_size:.2f} GB of images for {tag} (4x CPU Acceleration)...")
 
         # Discover images and index labels
         img_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         image_files = [p for p in stage_raw_dir.rglob("*") if p.suffix.lower() in img_extensions]
         label_index = {p.stem: p for p in stage_raw_dir.rglob("*.txt") if "label" in str(p).lower() or p.parent.name in ("train", "val", "labels", "default")}
 
-        count = 0
-        for i, img_path in enumerate(image_files):
+        def _process_one(item: tuple[int, Path]) -> int:
+            i, img_path = item
             is_val = (i % 10 == 0)
             target_img_dir = master_val_imgs if is_val else master_train_imgs
             target_lbl_dir = master_val_lbls if is_val else master_train_lbls
@@ -156,9 +181,12 @@ def prepare_and_tile_all(
                     cand2 = img_path.parents[1] / "labels" / (img_path.stem + ".txt")
                     if cand2.exists():
                         found_lbl = cand2
+            return tiler.tile_image_and_labels(img_path, found_lbl, target_img_dir, target_lbl_dir, cls_map)
 
-            n = tiler.tile_image_and_labels(img_path, found_lbl, target_img_dir, target_lbl_dir, cls_map)
-            count += n
+        count = 0
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for n in executor.map(_process_one, enumerate(image_files)):
+                count += n
 
         total_tiles += count
         print(f"[{idx}/{len(datasets_to_process)}] ✅ Generated {count} tiles (Running total: {total_tiles} tiles)")
@@ -174,6 +202,8 @@ def prepare_and_tile_all(
         state["completed_datasets"] = list(completed_datasets)
         state["total_tiles_generated"] = total_tiles
         layout.save_state(state)
+        # Keep data.yaml updated
+        yaml_path.write_text(yaml.dump(yaml_content, sort_keys=False), encoding="utf-8")
 
     # Write unified master data.yaml
     yaml_path = layout.tiled_batches / "data.yaml"

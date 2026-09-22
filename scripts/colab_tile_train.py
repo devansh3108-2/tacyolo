@@ -44,16 +44,11 @@ UNIFIED_4_IN_1_DATASETS = [
     {"ref": "simuletic/uav-and-aerial-view-battle-tank-detection-dataset", "tag": "p1_tank_uav", "cls_map": {0: 8, 1: 9}},
     {"ref": "sudipchakrabarty/kiit-mita", "tag": "p1_kiit_mita", "cls_map": {0: 8, 1: 7, 2: 0, 3: 6, 4: 10, 5: 9}},
 
-    # --- Pillar 2: CCTV & Adverse Weather Surveillance (BDD100K / Night FLIR / Crowds) ---
-    {"ref": "solomonk/berkeley-deepdrive-bdd100k-yolo", "tag": "p2_bdd100k_cctv", "cls_map": {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5}},
+    # --- Pillar 2: CCTV & Adverse Weather Surveillance (LLVIP / Thermal / Crowds) ---
     {"ref": "gaweshgomes/llvip-rgb-thermal-yolo-format", "tag": "p2_thermal_llvip", "cls_map": {0: 0}},
     {"ref": "pandrii000/hituav-a-highaltitude-infrared-thermal-dataset", "tag": "p2_thermal_hit", "cls_map": {0: 0, 1: 2, 2: 1, 3: 5}},
     {"ref": "niteshc7r/datasets-for-object-detection-night-and-thermal", "tag": "p2_night_thermal", "cls_map": {0: 0, 1: 2, 2: 5}},
     {"ref": "kausthubkannan/thermal-image-people-detection", "tag": "p2_thermal_ppl", "cls_map": {0: 0}},
-
-    # --- Pillar 3: Universal Object Detection (Google Open Images / Broad Classes) ---
-    {"ref": "ashishjangra27/open-images-dataset-v7-validation", "tag": "p3_openimages_v7", "cls_map": {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10}},
-    {"ref": "arashnic/open-images-dataset-v6-sample", "tag": "p3_openimages_sample", "cls_map": {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10}},
 ]
 
 
