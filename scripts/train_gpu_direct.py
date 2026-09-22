@@ -40,9 +40,43 @@ def train_gpu_direct(
     data_yaml = layout.tiled_batches / "data.yaml"
 
     if not data_yaml.exists():
-        print(f"❌ Error: Master dataset not found at {data_yaml}!")
-        print("👉 Please run scripts/prepare_tiles_cpu.py first to generate the tiles on Google Drive.")
-        sys.exit(1)
+        import yaml
+        try:
+            from scripts.colab_tile_train import CLASS_NAMES
+        except ImportError:
+            from colab_tile_train import CLASS_NAMES
+
+        train_img_dir = layout.tiled_batches / "images" / "train"
+        if train_img_dir.exists() and any(train_img_dir.glob("*.*")):
+            print(f"⚡ Detected tiled images in {train_img_dir}! Auto-generating missing data.yaml...")
+            yaml_content = {
+                "path": str(layout.tiled_batches.resolve()),
+                "train": "images/train",
+                "val": "images/val" if (layout.tiled_batches / "images" / "val").exists() else "images/train",
+                "names": {i: name for i, name in enumerate(CLASS_NAMES)},
+                "nc": len(CLASS_NAMES),
+            }
+            layout.tiled_batches.mkdir(parents=True, exist_ok=True)
+            data_yaml.write_text(yaml.dump(yaml_content, sort_keys=False), encoding="utf-8")
+            print(f"✅ Generated {data_yaml}")
+        else:
+            found_yamls = list(layout.root.rglob("data.yaml")) if layout.root.exists() else []
+            if found_yamls:
+                data_yaml = found_yamls[0]
+                print(f"✅ Discovered dataset YAML at: {data_yaml}")
+            else:
+                print(f"❌ Error: Master dataset not found at {data_yaml}!")
+                print(f"📁 Diagnostic inspect of {layout.root}:")
+                if layout.root.exists():
+                    for item in layout.root.iterdir():
+                        print(f"   - {item.name} ({'DIR' if item.is_dir() else 'FILE'})")
+                        if item.is_dir():
+                            sub_items = list(item.glob("*"))[:5]
+                            print(f"     Sample files: {[p.name for p in sub_items]}")
+                else:
+                    print(f"   ⚠️ {layout.root} does not exist. Is Google Drive mounted?")
+                print("\n👉 Please run scripts/prepare_tiles_cpu.py first to generate the tiles on Google Drive.")
+                sys.exit(1)
 
     # Resume from existing best.pt if present on Drive, else base model
     best_on_drive = layout.trained_weights / "best.pt"

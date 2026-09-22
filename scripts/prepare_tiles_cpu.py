@@ -62,6 +62,18 @@ def prepare_and_tile_all(
     for p in [master_train_imgs, master_train_lbls, master_val_imgs, master_val_lbls]:
         p.mkdir(parents=True, exist_ok=True)
 
+    # Ensure master data.yaml is written immediately so training is never blocked
+    yaml_path = layout.tiled_batches / "data.yaml"
+    import yaml
+    yaml_content = {
+        "path": str(layout.tiled_batches.resolve()),
+        "train": "images/train",
+        "val": "images/val",
+        "names": {i: name for i, name in enumerate(CLASS_NAMES)},
+        "nc": len(CLASS_NAMES),
+    }
+    yaml_path.write_text(yaml.dump(yaml_content, sort_keys=False), encoding="utf-8")
+
     datasets_to_process = UNIFIED_4_IN_1_DATASETS
     if auto_discover:
         print(f"🌐 Querying Kaggle for {auto_discover} tactical datasets across all 4 pillars...")
