@@ -423,49 +423,98 @@ class ColabBatchStreamingTrainer:
 
 
 def discover_kaggle_datasets(count: int = 500) -> list[dict]:
-    """Query Kaggle search API across defense and tactical domains to assemble up to `count` datasets."""
+    """Query Kaggle search API across all 4 tactical pillars to assemble up to `count` datasets.
+    
+    Pillars:
+    1. Drone & Overhead Aerial (UAV, VisDrone, DOTA, Air Defense)
+    2. CCTV & Adverse Weather Surveillance (BDD100K, Traffic, Crowds, Night)
+    3. Universal Object Detection (OpenImages, COCO, Vehicles, Pedestrians)
+    4. Thermal & Infrared (FLIR, HIT-UAV, LLVIP, Night Vision)
+    """
     import urllib.parse
     import urllib.request
 
-    queries = [
-        "drone yolo", "uav detection", "air defense", "thermal infrared yolo",
-        "flir yolo", "military aircraft", "tank yolo", "aerial object detection",
-        "visdrone", "satellite yolo", "soldier detection", "infrared detection",
-        "aerial surveillance", "uav tracking", "drone classification"
-    ]
+    # Curated base tactical datasets across all 4 pillars
     seen = set()
     found: list[dict] = []
 
-    # Include curated base tactical datasets first
-    for ds in DEFAULT_KAGGLE_TACTICAL_DATASETS:
-        seen.add(ds["ref"])
-        found.append(ds)
+    for ds in UNIFIED_4_IN_1_DATASETS:
+        if ds["ref"] not in seen:
+            seen.add(ds["ref"])
+            found.append(ds)
 
-    for q in queries:
-        if len(found) >= count:
-            break
-        for page in range(1, 8):
+    queries = [
+        # Pillar 1: Drones & Aerial
+        "drone yolo", "uav detection", "visdrone yolo", "aerial object detection",
+        "air defense yolo", "military aircraft", "tank yolo", "anti drone",
+        # Pillar 2: CCTV & Adverse Weather Surveillance
+        "cctv object detection", "traffic surveillance yolo", "security camera dataset",
+        "bdd100k yolo", "crowd detection yolo", "night surveillance", "pedestrian cctv",
+        # Pillar 3: Universal Object Detection & Foundation
+        "open images yolo", "universal object detection", "vehicle detection yolo",
+        "military vehicle yolo", "tank detection yolo", "weapon detection yolo",
+        # Pillar 4: Thermal & Infrared
+        "thermal infrared yolo", "flir object detection", "thermal human detection",
+        "llvip thermal", "infrared night vision", "military thermal vision"
+    ]
+
+    # Try official Kaggle API first
+    try:
+        from kaggle.api.kaggle_api_extended import KaggleApi
+        api = KaggleApi()
+        api.authenticate()
+        for q in queries:
             if len(found) >= count:
                 break
-            url = f"https://www.kaggle.com/api/v1/datasets/list?search={urllib.parse.quote(q)}&pageSize=50&page={page}"
-            req = urllib.request.Request(url, headers={"User-Agent": "tacyolo"})
-            try:
-                items = json.loads(urllib.request.urlopen(req, timeout=10).read())
-                if not items:
+            for page in range(1, 10):
+                if len(found) >= count:
                     break
-                for item in items:
-                    ref = item.get("ref")
-                    if ref and ref not in seen:
-                        seen.add(ref)
-                        found.append({
-                            "ref": ref,
-                            "tag": ref.replace("/", "_"),
-                            "cls_map": {0: 7},
-                        })
-                        if len(found) >= count:
-                            break
-            except Exception:
+                try:
+                    res = api.dataset_list(search=q, page=page)
+                    if not res:
+                        break
+                    for item in res:
+                        ref = getattr(item, "ref", None) or str(item)
+                        if ref and ref not in seen:
+                            seen.add(ref)
+                            found.append({
+                                "ref": ref,
+                                "tag": ref.replace("/", "_"),
+                                "cls_map": {0: 7},
+                            })
+                            if len(found) >= count:
+                                break
+                except Exception:
+                    break
+    except Exception as e:
+        print(f"[discover_kaggle_datasets] KaggleApi unavailable ({e}), using web fallback...")
+        for q in queries:
+            if len(found) >= count:
                 break
+            for page in range(1, 8):
+                if len(found) >= count:
+                    break
+                url = f"https://www.kaggle.com/api/v1/datasets/list?search={urllib.parse.quote(q)}&pageSize=50&page={page}"
+                req = urllib.request.Request(url, headers={"User-Agent": "tacyolo"})
+                try:
+                    items = json.loads(urllib.request.urlopen(req, timeout=10).read())
+                    if not items:
+                        break
+                    for item in items:
+                        ref = item.get("ref")
+                        if ref and ref not in seen:
+                            seen.add(ref)
+                            found.append({
+                                "ref": ref,
+                                "tag": ref.replace("/", "_"),
+                                "cls_map": {0: 7},
+                            })
+                            if len(found) >= count:
+                                break
+                except Exception:
+                    break
+
+    print(f"🔍 Discovered {len(found)} tactical datasets across all 4 pillars!")
     return found
 
 

@@ -29,6 +29,7 @@ try:
         UNIFIED_4_IN_1_DATASETS,
         DriveLayout,
         ImageTiler,
+        discover_kaggle_datasets,
         get_dir_size_gb,
     )
 except ImportError:
@@ -37,12 +38,17 @@ except ImportError:
         UNIFIED_4_IN_1_DATASETS,
         DriveLayout,
         ImageTiler,
+        discover_kaggle_datasets,
         get_dir_size_gb,
     )
 
 
 
-def prepare_and_tile_all(drive_root: str | Path = "/content/drive/MyDrive/TACYOLO", tile_size: int = 640) -> Path:
+def prepare_and_tile_all(
+    drive_root: str | Path = "/content/drive/MyDrive/TACYOLO",
+    tile_size: int = 640,
+    auto_discover: int | None = None,
+) -> Path:
     layout = DriveLayout(drive_root)
     layout.setup()
     tiler = ImageTiler(tile_size=tile_size)
@@ -56,23 +62,50 @@ def prepare_and_tile_all(drive_root: str | Path = "/content/drive/MyDrive/TACYOL
     for p in [master_train_imgs, master_train_lbls, master_val_imgs, master_val_lbls]:
         p.mkdir(parents=True, exist_ok=True)
 
+    datasets_to_process = UNIFIED_4_IN_1_DATASETS
+    if auto_discover:
+        print(f"🌐 Querying Kaggle for {auto_discover} tactical datasets across all 4 pillars...")
+        datasets_to_process = discover_kaggle_datasets(count=auto_discover)
+
+    # Load persistent pipeline state to never repeat already-completed datasets
+    state = layout.load_state()
+    completed_datasets = set(state.get("completed_datasets", []))
+
+    # Auto-seed completed datasets if existing tiles are found from the previous run
+    existing_tile_count = sum(1 for _ in master_train_imgs.glob("*.*"))
+    if existing_tile_count > 1000 and not completed_datasets:
+        print(f"📦 Detected {existing_tile_count} existing tiles from previous run. Auto-registering initial 14 datasets as completed...")
+        for b_ds in UNIFIED_4_IN_1_DATASETS:
+            completed_datasets.add(b_ds["ref"])
+            completed_datasets.add(b_ds.get("tag", b_ds["ref"].replace("/", "_")))
+        state["completed_datasets"] = list(completed_datasets)
+        layout.save_state(state)
+
     print("=================================================================")
     print("🚀 STAGE 1: CPU-ONLY DATA PREPARATION & TILING (ZERO GPU WASTED)")
     print(f"📁 Target Drive Root: {layout.root}")
+    print(f"📦 Total Datasets in Schedule: {len(datasets_to_process)}")
+    print(f"✅ Already Completed: {len(completed_datasets) // 2} datasets")
+    print(f"📊 Existing Tiles on Drive: {existing_tile_count}")
     print("=================================================================\n")
 
-    total_tiles = 0
+    total_tiles = existing_tile_count
     t0_all = time.time()
 
-    for idx, ds in enumerate(UNIFIED_4_IN_1_DATASETS, 1):
+    for idx, ds in enumerate(datasets_to_process, 1):
         ref = ds["ref"]
-        tag = ds["tag"]
+        tag = ds.get("tag", ref.replace("/", "_"))
         cls_map = ds.get("cls_map")
+
+        # Skip if already finished!
+        if ref in completed_datasets or tag in completed_datasets:
+            print(f"[{idx}/{len(datasets_to_process)}] ⏭️ Skipping already completed dataset: {ref}")
+            continue
 
         stage_raw_dir = layout.raw_data / tag
         stage_raw_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"[{idx}/{len(UNIFIED_4_IN_1_DATASETS)}] ⬇️ Downloading {ref} directly to Drive...")
+        print(f"[{idx}/{len(datasets_to_process)}] ⬇️ Downloading {ref} directly to Drive...")
         try:
             import kagglehub
             raw_path = Path(kagglehub.dataset_download(ref))
@@ -89,11 +122,12 @@ def prepare_and_tile_all(drive_root: str | Path = "/content/drive/MyDrive/TACYOL
             os.system(f"kaggle datasets download -d {ref} -p '{stage_raw_dir}' --unzip")
 
         raw_size = get_dir_size_gb(stage_raw_dir)
-        print(f"[{idx}/{len(UNIFIED_4_IN_1_DATASETS)}] 🔪 Tiling {raw_size:.2f} GB of images for {tag}...")
+        print(f"[{idx}/{len(datasets_to_process)}] 🔪 Tiling {raw_size:.2f} GB of images for {tag}...")
 
-        # Discover images
+        # Discover images and index labels
         img_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         image_files = [p for p in stage_raw_dir.rglob("*") if p.suffix.lower() in img_extensions]
+        label_index = {p.stem: p for p in stage_raw_dir.rglob("*.txt") if "label" in str(p).lower() or p.parent.name in ("train", "val", "labels", "default")}
 
         count = 0
         for i, img_path in enumerate(image_files):
@@ -101,25 +135,33 @@ def prepare_and_tile_all(drive_root: str | Path = "/content/drive/MyDrive/TACYOL
             target_img_dir = master_val_imgs if is_val else master_train_imgs
             target_lbl_dir = master_val_lbls if is_val else master_train_lbls
 
-            found_lbl = None
-            cand = img_path.parent / (img_path.stem + ".txt")
-            if cand.exists():
-                found_lbl = cand
-            elif len(img_path.parents) > 1:
-                cand2 = img_path.parents[1] / "labels" / (img_path.stem + ".txt")
-                if cand2.exists():
-                    found_lbl = cand2
+            found_lbl = label_index.get(img_path.stem)
+            if not found_lbl:
+                cand = img_path.parent / (img_path.stem + ".txt")
+                if cand.exists():
+                    found_lbl = cand
+                elif len(img_path.parents) > 1:
+                    cand2 = img_path.parents[1] / "labels" / (img_path.stem + ".txt")
+                    if cand2.exists():
+                        found_lbl = cand2
 
             n = tiler.tile_image_and_labels(img_path, found_lbl, target_img_dir, target_lbl_dir, cls_map)
             count += n
 
         total_tiles += count
-        print(f"[{idx}/{len(UNIFIED_4_IN_1_DATASETS)}] ✅ Generated {count} tiles (Running total: {total_tiles} tiles)")
+        print(f"[{idx}/{len(datasets_to_process)}] ✅ Generated {count} tiles (Running total: {total_tiles} tiles)")
 
         # Immediately purge the raw archive to keep Drive clean
-        print(f"[{idx}/{len(UNIFIED_4_IN_1_DATASETS)}] 🧹 Purging raw archive for {tag}...")
+        print(f"[{idx}/{len(datasets_to_process)}] 🧹 Purging raw archive for {tag}...")
         if stage_raw_dir.exists():
             shutil.rmtree(stage_raw_dir, ignore_errors=True)
+
+        # Mark this dataset as completed so it is NEVER repeated
+        completed_datasets.add(ref)
+        completed_datasets.add(tag)
+        state["completed_datasets"] = list(completed_datasets)
+        state["total_tiles_generated"] = total_tiles
+        layout.save_state(state)
 
     # Write unified master data.yaml
     yaml_path = layout.tiled_batches / "data.yaml"
@@ -147,9 +189,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="TACYOLO CPU Pre-Tiling Stage")
     parser.add_argument("--drive-root", default="/content/drive/MyDrive/TACYOLO", help="Google Drive Root Path")
     parser.add_argument("--tile-size", type=int, default=640, help="Tile resolution")
+    parser.add_argument("--auto-discover", type=int, default=None, help="Auto-discover N tactical datasets from Kaggle (e.g. 500)")
     args = parser.parse_args()
 
-    prepare_and_tile_all(drive_root=args.drive_root, tile_size=args.tile_size)
+    prepare_and_tile_all(drive_root=args.drive_root, tile_size=args.tile_size, auto_discover=args.auto_discover)
     return 0
 
 
