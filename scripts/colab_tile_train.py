@@ -178,7 +178,16 @@ class ImageTiler:
         return tiles_generated
 
 
+def get_dir_size_gb(path: Path) -> float:
+    """Calculate recursive directory size in gigabytes (GB)."""
+    if not path.exists():
+        return 0.0
+    total_bytes = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    return total_bytes / (1024 ** 3)
+
+
 class ColabBatchStreamingTrainer:
+
     """Manages downloading Kaggle datasets directly to Drive, tiling, training, and purging."""
 
     def __init__(self, layout: DriveLayout, tile_size: int = 640) -> None:
@@ -305,6 +314,7 @@ class ColabBatchStreamingTrainer:
         epochs_per_batch: int = 5,
         manifest_path: str | Path | None = None,
         auto_discover: int | None = None,
+        chunk_gb: float = 50.0,
     ) -> None:
         state = self.layout.load_state()
 
@@ -314,45 +324,78 @@ class ColabBatchStreamingTrainer:
         elif auto_discover and auto_discover > 0:
             print(f"[Auto-Discover] Dynamically discovering {auto_discover} tactical datasets from Kaggle...")
             datasets = discover_kaggle_datasets(count=auto_discover)
-            # Cache manifest to Drive and local
             manifest_cache = self.layout.root / f"manifest_{len(datasets)}_batches.json"
             manifest_cache.write_text(json.dumps(datasets, indent=2), encoding="utf-8")
             print(f"[Auto-Discover] Discovered {len(datasets)} batches! Saved manifest to {manifest_cache}")
         else:
             datasets = DEFAULT_KAGGLE_TACTICAL_DATASETS
 
-        start_idx = state.get("current_batch_index", 0)
         total_to_run = len(datasets)
-        print(f"[Pipeline] Ready to stream {total_to_run} total batches. Starting from index {start_idx}.")
+        ds_idx = state.get("current_batch_index", 0)
+        chunk_idx = state.get("current_chunk_index", 1)
 
-        for i in range(start_idx, total_to_run):
-            if max_batches is not None and (i - start_idx) >= max_batches:
+        print(f"[Pipeline] Ready to stream {total_to_run} datasets in ~{chunk_gb:.1f} GB chunks.")
+        print(f"[Pipeline] Resuming from dataset index {ds_idx}, Chunk #{chunk_idx}.")
+
+        while ds_idx < total_to_run:
+            if max_batches is not None and ds_idx >= max_batches:
                 break
-            ds = datasets[i]
-            ref = ds["ref"]
-            tag = ds.get("tag", ref.replace("/", "_"))
-            cls_map = ds.get("cls_map", {0: 7})
 
-            print(f"\n==========================================")
-            print(f"Starting Streaming Batch {i+1}/{total_to_run}: {ref} [{tag}]")
-            print(f"==========================================")
+            chunk_tag = f"chunk_{chunk_idx:03d}"
+            chunk_raw_dir = self.layout.raw_data / chunk_tag
+            chunk_raw_dir.mkdir(parents=True, exist_ok=True)
 
-            raw_dir = self.layout.raw_data / tag
-            try:
-                self.download_kaggle_batch(ref, raw_dir)
-                yaml_path = self.prepare_tiled_batch(raw_dir, tag, cls_map)
-                best_weights = self.train_batch(yaml_path, epochs=epochs_per_batch)
-            except Exception as e:
-                print(f"[Batch Error] Batch {tag} ({ref}) failed: {e}. Skipping to next batch...")
-            finally:
-                # Always purge raw and tile files to guarantee storage recycling
-                self.purge_batch_data(raw_dir, tag)
+            print(f"\n=================================================================")
+            print(f"📦 [Chunk {chunk_idx}] Staging up to {chunk_gb:.1f} GB of data directly to Drive...")
+            print(f"=================================================================")
 
-            state["completed_batches"].append(tag)
-            state["current_batch_index"] = i + 1
+            downloaded_in_chunk = 0
+            while ds_idx < total_to_run:
+                if max_batches is not None and ds_idx >= max_batches:
+                    break
+                ds = datasets[ds_idx]
+                ref = ds["ref"]
+                tag = ds.get("tag", ref.replace("/", "_"))
+                target_dest = chunk_raw_dir / tag
+
+                current_gb = get_dir_size_gb(chunk_raw_dir)
+                if current_gb >= chunk_gb and downloaded_in_chunk > 0:
+                    print(f"🎯 [Chunk {chunk_idx}] Target reached ({current_gb:.2f} GB / {chunk_gb:.1f} GB). Commencing training!")
+                    break
+
+                print(f"[Chunk {chunk_idx}] Step {downloaded_in_chunk+1} | Staged: {current_gb:.2f} GB / {chunk_gb:.1f} GB | Downloading {ref}...")
+                try:
+                    self.download_kaggle_batch(ref, target_dest)
+                    downloaded_in_chunk += 1
+                except Exception as e:
+                    print(f"[Warning] Failed to download {ref}: {e}. Skipping to next dataset...")
+                ds_idx += 1
+
+            chunk_final_gb = get_dir_size_gb(chunk_raw_dir)
+            if chunk_final_gb == 0:
+                print(f"[Chunk {chunk_idx}] No data staged. Ending pipeline.")
+                break
+
+            print(f"\n🚀 [Chunk {chunk_idx}] Tiling {chunk_final_gb:.2f} GB of imagery into 640x640 small-object tiles...")
+            yaml_path = self.prepare_tiled_batch(chunk_raw_dir, chunk_tag)
+
+            print(f"🏋️ [Chunk {chunk_idx}] Training YOLO model for {epochs_per_batch} epochs across {chunk_final_gb:.2f} GB chunk...")
+            best_weights = self.train_batch(yaml_path, epochs=epochs_per_batch)
+            print(f"✅ [Chunk {chunk_idx}] Checkpoint updated at: {best_weights}")
+
+            # Crucial 50GB purge: Free Google Drive storage back to 0 before the next chunk
+            print(f"🧹 [Chunk {chunk_idx}] Purging {chunk_final_gb:.2f} GB raw files & tiles from Drive to free space...")
+            self.purge_batch_data(chunk_raw_dir, chunk_tag)
+            print(f"✨ [Chunk {chunk_idx}] Drive space recycled! Ready for next {chunk_gb:.1f} GB chunk.\n")
+
+            state["current_batch_index"] = ds_idx
+            state["current_chunk_index"] = chunk_idx + 1
+            state["completed_chunks"] = state.get("completed_chunks", 0) + 1
             self.layout.save_state(state)
+            chunk_idx += 1
 
-        print("\nAll requested streaming batches completed successfully!")
+        print("\nAll requested 50 GB chunks trained and purged successfully!")
+
 
 
 def discover_kaggle_datasets(count: int = 500) -> list[dict]:
@@ -406,7 +449,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="TACYOLO Colab & Drive Batch Streaming Trainer")
     parser.add_argument("--drive-root", default="/content/drive/MyDrive/TACYOLO", help="Root path in Google Drive")
     parser.add_argument("--tile-size", type=int, default=640, help="Tile resolution for small object detection")
-    parser.add_argument("--epochs", type=int, default=5, help="Epochs per batch (recommended 3-5 for 500 batches)")
+    parser.add_argument("--epochs", type=int, default=5, help="Epochs per chunk (recommended 3-10)")
+    parser.add_argument("--chunk-gb", type=float, default=50.0, help="Download buffer size in GB before training & purging (default: 50.0)")
     parser.add_argument("--max-batches", type=int, default=None, help="Max batches to process in this run")
     parser.add_argument("--manifest", default=None, help="Path to JSON manifest listing custom batches")
     parser.add_argument("--auto-discover", type=int, default=None, help="Auto-discover N tactical datasets from Kaggle")
@@ -430,8 +474,10 @@ def main() -> int:
         epochs_per_batch=args.epochs,
         manifest_path=args.manifest,
         auto_discover=args.auto_discover,
+        chunk_gb=args.chunk_gb,
     )
     return 0
+
 
 
 if __name__ == "__main__":

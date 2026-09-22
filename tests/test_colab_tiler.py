@@ -81,3 +81,17 @@ def test_purge_batch_data(tmp_path: Path) -> None:
 
     assert not raw_dir.exists()
     assert not tiled_dir.exists()
+
+
+def test_get_dir_size_gb(tmp_path: Path) -> None:
+    from scripts.colab_tile_train import get_dir_size_gb
+
+    d = tmp_path / "sized_dir"
+    d.mkdir()
+    # 1MB file
+    f = d / "data.bin"
+    f.write_bytes(b"\x00" * 1024 * 1024)
+
+    gb = get_dir_size_gb(d)
+    assert 0.0 < gb < 0.01
+
