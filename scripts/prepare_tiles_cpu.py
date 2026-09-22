@@ -16,13 +16,30 @@ import sys
 import time
 from pathlib import Path
 
-from scripts.colab_tile_train import (
-    CLASS_NAMES,
-    UNIFIED_4_IN_1_DATASETS,
-    DriveLayout,
-    ImageTiler,
-    get_dir_size_gb,
-)
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+try:
+    from scripts.colab_tile_train import (
+        CLASS_NAMES,
+        UNIFIED_4_IN_1_DATASETS,
+        DriveLayout,
+        ImageTiler,
+        get_dir_size_gb,
+    )
+except ImportError:
+    from colab_tile_train import (
+        CLASS_NAMES,
+        UNIFIED_4_IN_1_DATASETS,
+        DriveLayout,
+        ImageTiler,
+        get_dir_size_gb,
+    )
+
 
 
 def prepare_and_tile_all(drive_root: str | Path = "/content/drive/MyDrive/TACYOLO", tile_size: int = 640) -> Path:

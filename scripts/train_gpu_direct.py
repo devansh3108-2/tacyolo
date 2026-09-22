@@ -14,7 +14,19 @@ import shutil
 import sys
 from pathlib import Path
 
-from scripts.colab_tile_train import DriveLayout
+ROOT = Path(__file__).resolve().parents[1]
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+try:
+    from scripts.colab_tile_train import DriveLayout
+except ImportError:
+    from colab_tile_train import DriveLayout
+
 
 
 def train_gpu_direct(
