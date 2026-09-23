@@ -429,8 +429,8 @@ def run_pipeline(
             continue
 
         label_index = {p.stem: p for p in src_dir.rglob("*.txt")}
-        dataset_tiles = 0
-
+        total_imgs = len(images)
+        print(f"   📊 Found {total_imgs} images. Tiling on {tiler.device}...")
         for i, img_path in enumerate(images):
             # Split train vs val
             is_val = (i % int(1.0 / max(0.01, val_split_ratio))) == 0
@@ -447,6 +447,10 @@ def run_pipeline(
 
             n = tiler.tile_image(img_path, lbl_path, out_img, out_lbl, dataset_key=key)
             dataset_tiles += n
+
+            if (i + 1) % 500 == 0 or (i + 1) == total_imgs:
+                pct = ((i + 1) / total_imgs) * 100
+                print(f"   [{i + 1}/{total_imgs}] ({pct:.1f}%) -> {dataset_tiles} tiles generated so far...")
 
         total_generated += dataset_tiles
         print(f"   ✅ Finished {cfg['name']}: {dataset_tiles} tiles produced.")

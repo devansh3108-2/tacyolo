@@ -41,24 +41,49 @@ try:
 except Exception:
     print("⚠️  Not in Colab or Drive already mounted. Continuing...")
 
-# Persistent project directories on Google Drive
-DRIVE_ROOT     = Path("/content/drive/MyDrive/TACYOLO")
-DRIVE_DATASETS = DRIVE_ROOT / "datasets" / "tactical_cuas_armor"
-DRIVE_WEIGHTS  = DRIVE_ROOT / "trained_weights"
-DRIVE_EXPORTS  = DRIVE_ROOT / "exports"
+# ─── PRECISE GOOGLE DRIVE FOLDER STRUCTURE (Matching User Layout) ─────────────
+DRIVE_ROOT        = Path("/content/drive/MyDrive/TACYOLO")
+DRIVE_RAW_DATA    = DRIVE_ROOT / "raw_data"
+DRIVE_TILED       = DRIVE_ROOT / "tiled_batches"
+DRIVE_TRAINED_W   = DRIVE_ROOT / "trained_weights"
+DRIVE_WEIGHTS     = DRIVE_ROOT / "weights"
+DRIVE_RUNS        = DRIVE_ROOT / "runs"
+DRIVE_EXPORTS     = DRIVE_ROOT / "exports"
+DRIVE_METRICS     = DRIVE_ROOT / "metrics_logs"
+DRIVE_CALIB       = DRIVE_ROOT / "calibration_data"
+DRIVE_TESTING     = DRIVE_ROOT / "working_testing"
 
-for d in [DRIVE_ROOT, DRIVE_DATASETS, DRIVE_WEIGHTS, DRIVE_EXPORTS]:
+# Ensure all folders in the user's hierarchy exist
+ALL_DRIVE_FOLDERS = [
+    DRIVE_ROOT,
+    DRIVE_RAW_DATA,
+    DRIVE_TILED,
+    DRIVE_TRAINED_W,
+    DRIVE_WEIGHTS,
+    DRIVE_RUNS,
+    DRIVE_EXPORTS,
+    DRIVE_METRICS,
+    DRIVE_CALIB,
+    DRIVE_TESTING,
+]
+for d in ALL_DRIVE_FOLDERS:
     d.mkdir(parents=True, exist_ok=True)
+print("✅ Verified Google Drive structure (TACYOLO hierarchy ready)")
 
-# Clone or pull TACYOLO repo
-REPO_DIR = Path("/content/TACYOLO")
-REPO_URL = "https://github.com/devansh3108-2/tacyolo.git"  # Update with your repo URL
+# Detect or clone YOLO repo
+DRIVE_REPO_CANDIDATE = Path("/content/drive/MyDrive/YOLO")
+LOCAL_REPO_CANDIDATE = Path("/content/YOLO")
 
-if REPO_DIR.exists():
-    print("🔄 TACYOLO repo exists. Pulling latest...")
-    os.system(f"cd {REPO_DIR} && git pull --rebase 2>/dev/null || true")
+if DRIVE_REPO_CANDIDATE.exists():
+    REPO_DIR = DRIVE_REPO_CANDIDATE
+    print(f"📁 Using repository from Drive: {REPO_DIR}")
+elif LOCAL_REPO_CANDIDATE.exists():
+    REPO_DIR = LOCAL_REPO_CANDIDATE
+    print(f"📁 Using repository from local /content: {REPO_DIR}")
 else:
-    print(f"📥 Cloning TACYOLO repo...")
+    REPO_DIR = LOCAL_REPO_CANDIDATE
+    REPO_URL = "https://github.com/devansh3108-2/tacyolo.git"
+    print(f"📥 Cloning repo into {REPO_DIR}...")
     os.system(f"git clone --depth 1 {REPO_URL} {REPO_DIR}")
 
 sys.path.insert(0, str(REPO_DIR))
@@ -89,52 +114,154 @@ print("\n✅ Cell 1 Complete: Environment Ready.\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CELL 2: DOWNLOAD ALL 6 DATASETS INTO ONE UNIFIED FOLDER
+# CELL 2: INGEST DATASET (PRIORITIZING datasets.zip & Drive TACYOLO/tiles)
 # ══════════════════════════════════════════════════════════════════════════════
 print("=" * 72)
-print("  CELL 2: DOWNLOADING ALL 6 C-UAS & ARMOR DATASETS")
+print("  CELL 2: LOADING DATASET FROM DRIVE (datasets.zip or tiles/)")
 print("=" * 72)
 
-# Kaggle credentials (set yours here or upload kaggle.json)
-# os.environ["KAGGLE_USERNAME"] = "your_username"
-# os.environ["KAGGLE_KEY"]      = "your_key"
+LOCAL_DATASET = Path("/content/dataset")
+LOCAL_DATASET.mkdir(parents=True, exist_ok=True)
 
-# Symlink unified dataset folder to Drive for persistence
-LOCAL_DATASET = REPO_DIR / "datasets" / "tactical_cuas_armor"
-if not LOCAL_DATASET.exists():
-    LOCAL_DATASET.parent.mkdir(parents=True, exist_ok=True)
-    os.symlink(str(DRIVE_DATASETS), str(LOCAL_DATASET))
-    print(f"🔗 Symlinked local dataset -> Drive: {DRIVE_DATASETS}")
+DRIVE_ZIP = Path("/content/drive/MyDrive/datasets.zip")
+DRIVE_TILES = Path("/content/drive/MyDrive/TACYOLO/tiles")
+DRIVE_TILED_BATCHES = Path("/content/drive/MyDrive/TACYOLO/tiled_batches")
 
-t0 = time.time()
-os.system(f"python {REPO_DIR}/scripts/download_6_datasets.py --skip-tile --workers 3")
-dl_time = time.time() - t0
-print(f"\n⏱️  Downloads completed in {dl_time/60:.1f} minutes")
+dataset_loaded = False
 
-# Count what we have
+# Option A: Check for /content/drive/MyDrive/datasets.zip
+if DRIVE_ZIP.exists():
+    print(f"📦 Found Drive archive: {DRIVE_ZIP} ({DRIVE_ZIP.stat().st_size / (1024**3):.2f} GB)")
+    print(f"⚡ Unzipping to high-speed NVMe ({LOCAL_DATASET})...")
+    os.system(f"unzip -q -o '{DRIVE_ZIP}' -d '{LOCAL_DATASET}'")
+    print("✅ datasets.zip successfully extracted!")
+    dataset_loaded = True
+
+# Option B: Check for /content/drive/MyDrive/TACYOLO/tiles
+elif DRIVE_TILES.exists() and any(DRIVE_TILES.iterdir()):
+    print(f"📁 Found existing tiles directory in Drive: {DRIVE_TILES}")
+    print(f"⚡ Syncing tiles to local NVMe ({LOCAL_DATASET})...")
+    os.system(f"rsync -a --info=progress2 '{DRIVE_TILES}/' '{LOCAL_DATASET}/'")
+    print("✅ Tiles synced from Drive!")
+    dataset_loaded = True
+
+# Option C: Check for /content/drive/MyDrive/TACYOLO/tiled_batches
+elif DRIVE_TILED_BATCHES.exists() and any(DRIVE_TILED_BATCHES.iterdir()):
+    print(f"📁 Found existing tiled_batches directory in Drive: {DRIVE_TILED_BATCHES}")
+    print(f"⚡ Syncing tiled_batches to local NVMe ({LOCAL_DATASET})...")
+    os.system(f"rsync -a --info=progress2 '{DRIVE_TILED_BATCHES}/' '{LOCAL_DATASET}/'")
+    print("✅ Tiled batches synced from Drive!")
+    dataset_loaded = True
+
+# Option D: Fallback download if no pre-existing dataset found
+if not dataset_loaded:
+    print("ℹ️ No Drive datasets.zip or tiles folder found. Downloading all 6 datasets...")
+    t0 = time.time()
+    os.system(f"python {REPO_DIR}/scripts/download_6_datasets.py --skip-tile --workers 4")
+    dl_time = time.time() - t0
+    print(f"⏱️  Downloads completed in {dl_time/60:.1f} minutes")
+    print("⚡ Running GPU tiler...")
+    os.system(f"python {REPO_DIR}/scripts/prepare_cuas_armor_gpu.py --tile-size 640 --overlap 0.2")
+    os.system(f"cp -r {REPO_DIR}/datasets/tactical_cuas_armor/* '{LOCAL_DATASET}/'")
+
+# ─── RESOLVE & FIX data.yaml WITH ABSOLUTE IMAGE PATHS ────────────────────────
+from ultralytics import settings
+settings.update({"datasets_dir": str(LOCAL_DATASET.resolve())})
+
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+# 1. Strictly locate train and val folders that contain ACTUAL IMAGES (ignoring labels folders)
+train_img_dir = None
+val_img_dir = None
+
+for cand in LOCAL_DATASET.rglob("train"):
+    if cand.is_dir() and "labels" not in cand.parts:
+        # Verify it contains at least one real image file
+        if any(f.suffix.lower() in IMG_EXTS for f in cand.glob("*.*")):
+            train_img_dir = cand
+            break
+
+for cand in LOCAL_DATASET.rglob("val"):
+    if cand.is_dir() and "labels" not in cand.parts:
+        if any(f.suffix.lower() in IMG_EXTS for f in cand.glob("*.*")):
+            val_img_dir = cand
+            break
+
+# Fallbacks if structure differs
+if not train_img_dir:
+    for cand in LOCAL_DATASET.rglob("images"):
+        if (cand / "train").exists():
+            train_img_dir = cand / "train"
+            val_img_dir = cand / "val"
+            break
+
+if not train_img_dir:
+    train_img_dir = LOCAL_DATASET / "images" / "train"
+    val_img_dir = LOCAL_DATASET / "images" / "val"
+
+if not val_img_dir or not val_img_dir.exists():
+    val_img_dir = train_img_dir
+
+# Identify dataset root directory (parent of images/ or parent of train/)
+if train_img_dir.parent.name == "images":
+    actual_dataset_root = train_img_dir.parent.parent
+else:
+    actual_dataset_root = train_img_dir.parent
+
+# Borrow existing class names if present
+names = {
+    0: "person", 1: "bird", 2: "drone", 3: "fixed_wing_uav",
+    4: "helicopter", 5: "airplane", 6: "tank", 7: "armored_vehicle",
+    8: "military_truck", 9: "artillery", 10: "civilian_vehicle", 11: "boat"
+}
+nc = 12
+
+for y in LOCAL_DATASET.rglob("*.yaml"):
+    if "labels" in y.parts:
+        continue
+    try:
+        import yaml
+        with open(y, "r", encoding="utf-8") as f:
+            yd = yaml.safe_load(f)
+            if isinstance(yd, dict) and "names" in yd:
+                names = yd["names"]
+                nc = yd.get("nc", len(names))
+                break
+    except Exception:
+        pass
+
+# Force direct ABSOLUTE POSIX paths for train & val in data.yaml
+import yaml
+DATA_YAML = actual_dataset_root / "data.yaml"
+master_content = {
+    "path": str(actual_dataset_root.resolve().as_posix()),
+    "train": str(train_img_dir.resolve().as_posix()),  # Absolute image path
+    "val": str(val_img_dir.resolve().as_posix()),      # Absolute image path
+    "nc": nc,
+    "names": names,
+}
+DATA_YAML.write_text(yaml.dump(master_content, sort_keys=False), encoding="utf-8")
+
+# Also copy data.yaml to LOCAL_DATASET root for convenience
+if DATA_YAML != (LOCAL_DATASET / "data.yaml"):
+    shutil.copy2(DATA_YAML, LOCAL_DATASET / "data.yaml")
+
+# Create symlinks in /content/YOLO/datasets to satisfy any legacy Ultralytics lookup
+os.system("mkdir -p /content/YOLO/datasets/datasets")
+os.system(f"ln -sfn '{actual_dataset_root}' /content/YOLO/datasets/tactical_cuas_armor")
+os.system(f"ln -sfn '{actual_dataset_root}' /content/YOLO/datasets/datasets/tactical_cuas_armor")
+os.system(f"ln -sfn '{LOCAL_DATASET}' /content/YOLO/datasets/dataset")
+
+print(f"📄 Master Dataset YAML: {DATA_YAML}")
+print(f"   Train Image Dir: {train_img_dir.resolve()} ({sum(1 for f in train_img_dir.glob('*.*') if f.suffix.lower() in IMG_EXTS)} images)")
+print(f"   Val Image Dir  : {val_img_dir.resolve()} ({sum(1 for f in val_img_dir.glob('*.*') if f.suffix.lower() in IMG_EXTS)} images)")
+
+# Count images
 img_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-total_src_imgs = sum(1 for p in DRIVE_DATASETS.rglob("*") if p.is_file() and p.suffix.lower() in img_exts)
-print(f"📊 Total Source Images Across 6 Datasets: {total_src_imgs}")
-print("\n✅ Cell 2 Complete: All 6 Datasets Downloaded.\n")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CELL 3: GPU-TILE ALL IMAGES (A100 CUDA TENSOR SLICING)
-# ══════════════════════════════════════════════════════════════════════════════
-print("=" * 72)
-print("  CELL 3: A100 GPU-ACCELERATED TILING (640x640)")
-print("=" * 72)
-
-t0 = time.time()
-os.system(f"python {REPO_DIR}/scripts/prepare_cuas_armor_gpu.py --tile-size 640 --overlap 0.2")
-tile_time = time.time() - t0
-
-# Count generated tiles
-train_tiles = len(list((DRIVE_DATASETS / "images" / "train").glob("*.*"))) if (DRIVE_DATASETS / "images" / "train").exists() else 0
-val_tiles = len(list((DRIVE_DATASETS / "images" / "val").glob("*.*"))) if (DRIVE_DATASETS / "images" / "val").exists() else 0
-print(f"\n⏱️  Tiling completed in {tile_time/60:.1f} minutes")
-print(f"📊 Tiles Generated: {train_tiles} train + {val_tiles} val = {train_tiles + val_tiles} total")
-print("\n✅ Cell 3 Complete: GPU Tiling Done.\n")
+train_imgs = sum(1 for p in (actual_dataset_root / train_rel).glob("*.*") if p.is_file() and p.suffix.lower() in img_exts) if (actual_dataset_root / train_rel).exists() else 0
+val_imgs = sum(1 for p in (actual_dataset_root / val_rel).glob("*.*") if p.is_file() and p.suffix.lower() in img_exts) if (actual_dataset_root / val_rel).exists() else 0
+print(f"📊 Training Dataset Ready: {train_imgs} train images | {val_imgs} val images")
+print("\n✅ Cell 2 Complete: Dataset Ready on Local NVMe.\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -154,7 +281,7 @@ if ENABLE_DISTILLATION:
     )
 
     distill_config = PipelineConfig.default_tri_teacher(
-        input_dir=str(DRIVE_DATASETS / "images" / "train"),
+        input_dir=str(LOCAL_DATASET / "images" / "train"),
         output_dir=str(DRIVE_ROOT / "distilled_dataset"),
         yolov8_weights="yolov8x.pt",
         yolo11_weights="yolo11x.pt",
@@ -177,7 +304,7 @@ if ENABLE_DISTILLATION:
     print(f"📊 Train={partition.train_count}, Val={partition.val_count}, Test={partition.test_count}")
 else:
     print("⏭️  Skipping multi-teacher distillation (using pre-tiled dataset directly).")
-    TRAIN_YAML = DRIVE_DATASETS / "data.yaml"
+    TRAIN_YAML = LOCAL_DATASET / "data.yaml"
     print(f"📄 Using existing dataset: {TRAIN_YAML}")
 
 print("\n✅ Cell 4 Complete.\n")
@@ -266,7 +393,6 @@ results = model.train(
     close_mosaic=CLOSE_MOSAIC,
     patience=25,
     cos_lr=True,          # Cosine learning rate decay for smoother convergence
-    label_smoothing=0.1,  # Slight label smoothing for better calibration
     overlap_mask=True,    # Better instance separation
     verbose=True,
 )
@@ -278,12 +404,14 @@ best_pt = run_dir / "weights" / "best.pt"
 last_pt = run_dir / "weights" / "last.pt"
 
 if best_pt.exists():
-    shutil.copy2(best_pt, DRIVE_WEIGHTS / "best.pt")
-    shutil.copy2(best_pt, DRIVE_WEIGHTS / "tactical_yolo11s_cuas_armor.pt")
-    print(f"\n⭐ Best weights saved to Drive: {DRIVE_WEIGHTS / 'best.pt'}")
+    for target_dir in [DRIVE_WEIGHTS, DRIVE_TRAINED_W]:
+        shutil.copy2(best_pt, target_dir / "best.pt")
+        shutil.copy2(best_pt, target_dir / "tactical_yolo11s_cuas_armor.pt")
+    print(f"\n⭐ Best weights saved to Drive: weights/ & trained_weights/")
 if last_pt.exists():
-    shutil.copy2(last_pt, DRIVE_WEIGHTS / "last.pt")
-    print(f"💾 Last checkpoint saved to Drive: {DRIVE_WEIGHTS / 'last.pt'}")
+    for target_dir in [DRIVE_WEIGHTS, DRIVE_TRAINED_W]:
+        shutil.copy2(last_pt, target_dir / "last.pt")
+    print(f"💾 Last checkpoint saved to Drive: weights/ & trained_weights/")
 
 print(f"\n⏱️  Training completed in {train_time/60:.1f} minutes ({train_time/3600:.1f} hours)")
 

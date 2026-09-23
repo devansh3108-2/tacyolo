@@ -30,6 +30,9 @@ data/tactical/bot_queue.json
 !examples/**
 
 *.b64
+*.zip
+*.tar*
+*.7z
 
 # secrets
 kaggle.json
